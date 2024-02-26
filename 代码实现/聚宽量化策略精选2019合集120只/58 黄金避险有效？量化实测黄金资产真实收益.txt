@@ -1,0 +1,298 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/view/community/detail/16353
+# 标题：黄金避险有效？量化实测黄金资产真实收益
+# 回测需要选择 python 2
+
+from jqdata import *
+import pandas as pd
+from pandas import Series, DataFrame
+import numpy as np
+from datetime import datetime,timedelta
+import time
+import scipy.stats as st
+import seaborn as sns
+import statsmodels.api as sm
+import warnings
+from jqfactor import get_factor_values
+
+
+'''
+================================================================================
+总体回测前
+================================================================================
+'''
+
+    
+#总体回测前要做的事情
+def initialize(context):
+ 
+    set_params(context)    #1 设置策参数
+    set_variables() #2 设置中间变量
+    set_backtest()  #3 设置回测条件
+    run_daily(market_open, time='open', reference_security='000300.XSHG')
+    
+#1 设置策略参数
+def set_params(context):
+    g.corrlength = 90
+    g.stockpool = []
+    g.signal = 'sell'
+    
+    # 设置RSRS指标中N, M的值
+    #统计周期
+    g.N = 18
+    #统计样本长度
+    g.M = 1200
+    #首次运行判断
+    g.init = True
+    #风险参考基准
+    g.security1 = '000300.XSHG'
+    # 最大持股数量
+    g.hold_stocks = 20
+    
+    # 设定策略运行基准
+    set_benchmark(g.security1)
+    #记录策略运行天数
+    g.days = 0
+    #set_benchmark(g.stock)
+    # 买入阈值
+    g.buy = 0.7
+    g.sell = -0.7
+    
+    # RSRS信号
+    # 用于记录回归后的beta值，即斜率
+    g.ans = []
+    # 用于计算被决定系数加权修正后的贝塔值
+    g.ans_rightdev= []
+    
+    # 计算2005年1月5日至回测开始日期的RSRS斜率指标
+    prices = get_price(g.security1, '2005-01-05', context.previous_date, '1d', ['high', 'low'])
+    highs = prices.high
+    lows = prices.low
+    g.ans = []
+    for i in range(len(highs))[g.N:]:
+        data_high = highs.iloc[i-g.N+1:i+1]
+        data_low = lows.iloc[i-g.N+1:i+1]
+        X = sm.add_constant(data_low)
+        model = sm.OLS(data_high,X)
+        results = model.fit()
+        g.ans.append(results.params[1])
+        #计算r2
+        g.ans_rightdev.append(results.rsquared)
+    
+
+#2 设置中间变量
+def set_variables():
+    g.feasible_stocks = []  # 当前可交易股票池
+    g.num_stocks = 0        # 设置持仓股票数目
+    
+#3 设置回测条件
+def set_backtest():
+    set_benchmark('000906.XSHG')       # 设置为基准
+    set_option('use_real_price', True) # 用真实价格交易
+    set_option('order_volume_ratio', 1)# 放大买入限制
+    log.set_level('order', 'error')    # 设置报错等级
+
+'''
+================================================================================
+每天开盘前
+================================================================================
+'''
+#每天开盘前要做的事情
+def before_trading_start(context):
+	#设置手续费与手续费
+    set_slip_fee(context)
+
+#6 根据不同的时间段设置滑点与手续费
+def set_slip_fee(context):
+    # 将滑点设置为0
+    # set_slippage(FixedSlippage(0)) 
+    set_slippage(PriceRelatedSlippage(0.002))  
+    # 根据不同的时间段设置手续费
+    dt=context.current_dt
+    
+    if dt>datetime(2013,1, 1):
+        set_commission(PerTrade(buy_cost=0.0003, 
+                                sell_cost=0.0013, 
+                                min_cost=5)) 
+        
+    elif dt>datetime(2011,1, 1):
+        set_commission(PerTrade(buy_cost=0.001, 
+                                sell_cost=0.002, 
+                                min_cost=5))
+            
+    elif dt>datetime(2009,1, 1):
+        set_commission(PerTrade(buy_cost=0.002, 
+                                sell_cost=0.003, 
+                                min_cost=5))
+                
+    else:
+        set_commission(PerTrade(buy_cost=0.003, 
+                                sell_cost=0.004, 
+                                min_cost=5))
+                                
+'''
+================================================================================
+每天交易时
+================================================================================
+'''
+def handle_data(context,data):
+    
+    #获得股票,ROE除以PB指标
+    stock_buy = func_stocks(context)
+    # 获取相关性最高的部分个股
+    stock_buy = corr_security(stock_buy,g.security1,g.hold_stocks)
+    print("buy_stocks:",len(stock_buy))
+    
+    # 下单交易
+    rebalance(context, stock_buy)
+
+
+def market_open(context):
+    # RSRS信号
+    security1 = g.security1
+    # 填入各个日期的RSRS斜率值
+    beta=0
+    r2=0
+    if g.init:
+        g.init = False
+    else:
+        #RSRS斜率指标定义
+        prices = attribute_history(security1, g.N, '1d', ['high', 'low'])
+        highs = prices.high
+        lows = prices.low
+        X = sm.add_constant(lows)
+        model = sm.OLS(highs, X)
+        beta = model.fit().params[1]
+        g.ans.append(beta)
+        #计算r2
+        r2=model.fit().rsquared
+        g.ans_rightdev.append(r2)
+    # 计算均值序列    
+    section = g.ans[-g.M:]
+    # 计算均值序列
+    mu = np.mean(section)
+    # 计算标准化RSRS指标序列
+    sigma = np.std(section)
+    zscore = (section[-1]-mu)/sigma  
+    #计算右偏RSRS标准分
+    zscore_rightdev= zscore*beta*r2
+    
+    
+    #  如果上一时间点的RSRS斜率大于买入阈值, 标记择时信号为买入
+    if zscore_rightdev > g.buy : # and zscore_rightdev2 > g.buy:
+        # 记录这次买入
+        log.info("市场风险在合理范围")
+        #对择时信号进行标记
+        g.signal = 'buy'
+    # 如果上一时间点的RSRS斜率小于卖出阈值, 标记择时信号为卖出
+    elif (zscore_rightdev < g.sell ) and (len(context.portfolio.positions.keys()) > 0):
+        # 记录这次卖出
+        log.info("市场风险过大，买入其他产品避险")
+        # 对择时信号进行标记
+        g.signal = 'sell'
+
+
+#买入和卖出的函数
+def rebalance(context, holding_list):
+    
+    if g.signal == 'buy':
+        
+        # 首先清仓其他避险资产，腾出资金买股票
+        order_target_value('518880.XSHG', 0)
+        
+        if len(holding_list)==0:
+            every_stock = 0
+        else:
+            every_stock = context.portfolio.total_value/len(holding_list)
+        # 空仓只有买入操作
+        if len(list(context.portfolio.positions.keys()))==0:
+        # 原设定重scort始于回报率相关打分计算，回报率是升序排列
+            for stock_to_buy in holding_list: 
+                order_target_value(stock_to_buy, every_stock)
+        else :
+            # 不是空仓先卖出持有但是不在购买名单中的股票
+            for stock_to_sell in list(context.portfolio.positions.keys()):
+                if stock_to_sell not in holding_list:
+                    order_target_value(stock_to_sell, 0)
+        # 因order函数调整为顺序调整，为防止先行调仓股票由于后行调仓股票占金额过大不能一次调整到位，这里运行两次以解决这个问题
+            for stock in holding_list:
+                order_target_value(stock, every_stock)
+                
+    if g.signal == 'sell':
+        stocks = get_index_stocks('000906.XSHG') 
+#        for stock in context.portfolio.positions.keys():
+#            if '511880.XSHG' not in list(context.portfolio.positions.keys()):
+        for i in stocks:
+            order_target_value(i, 0)
+        # print(context.portfolio.positions.keys())
+        
+        if '518880.XSHG' not in list(context.portfolio.positions.keys()):
+            order_target_value('518880.XSHG', context.portfolio.available_cash)
+            print(context.portfolio.positions.keys(),context.portfolio.positions_value)
+        
+    
+# 求阶段性高相关个股
+def corr_security(security_list,index,n):
+    corr_list = []
+    # 获取两个数据：个股序列security_price，指数序列index_price
+    for i in security_list:
+        security_price = attribute_history(i, g.corrlength, '1d', ['close']).close
+        index_price = attribute_history(index, g.corrlength, '1d', ['close']).close
+        corr_prine = pd.Series(security_price).corr(pd.Series(index_price))
+        corr_list.append((i, corr_prine))
+
+    # 降序排列
+    corr_list.sort(key = lambda l: l[1], reverse = True) 
+    # 转化成np.array结构，方便取出第一列数据（股票代码）
+    np_corr_list = np.array(corr_list)[:,0]
+    # 取出前stocksnum个股票买入，（买入名单stock_list）的前n名
+    np_corr_list = list(np_corr_list[:n])
+    # print np_corr_list
+    return np_corr_list    
+    
+    
+# 过滤次新股
+# 通过context.current_dt.date实现
+def remove_new_stocks(context, security_list):
+    for stock in security_list:
+        days_public = (context.current_dt.date() - get_security_info(stock).start_date).days
+        if days_public < 365:
+            security_list.remove(stock)
+    return security_list   
+    
+
+# 过滤股票，过滤停牌退市ST股票，选股时使用
+def filter_stock_ST(stock_list):
+    curr_data = get_current_data()
+    for stock in stock_list:
+        if (curr_data[stock].paused) or (curr_data[stock].is_st) or ('ST' in curr_data[stock].name)\
+            or ('*' in curr_data[stock].name)\
+            or ('退' in curr_data[stock].name):
+            stock_list.remove(stock)
+    return stock_list
+    
+
+# 每月选股
+def func_stocks(context):
+    
+    stocks = get_index_stocks('000906.XSHG')
+    stocks = remove_new_stocks(context, stocks)
+    stocks = filter_stock_ST(stocks)
+    
+    q = query(
+              valuation.code,
+              indicator.roe / valuation.pb_ratio,
+             )
+    data_ = get_fundamentals(q.filter(valuation.code.in_(stocks)),date=context.previous_date).fillna(0)
+
+    #得到ROE_pb
+    data_.columns = ['code','roe_pb']
+    #排名
+    ROE_pb_sort = data_.sort('roe_pb',ascending=False)
+    print(ROE_pb_sort)
+    #形成股票池
+    stock_to_buy = list(ROE_pb_sort.code)[:100]
+    
+    return stock_to_buy
+    

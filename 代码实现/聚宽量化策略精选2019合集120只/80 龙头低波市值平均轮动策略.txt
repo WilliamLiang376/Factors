@@ -1,0 +1,262 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/21925
+# 标题：龙头低波市值平均轮动策略
+# 作者：无悔
+
+# 导入函数库
+from jqdata import *
+
+# 初始化函数，设定基准等等
+def initialize(context):
+    set_option("avoid_future_data", True)
+    # 设定沪深300作为基准
+    set_benchmark('000300.XSHG')
+    #设定上证指数为基准
+    #set_benchmark('000001.XSHG')
+    # 开启动态复权模式(真实价格)
+    set_option('use_real_price', True)
+    # 输出内容到日志 log.info()
+    log.info('初始函数开始运行且全局只运行一次')
+    # 过滤掉order系列API产生的比error级别低的log
+    log.set_level('order', 'error')
+
+    ### 股票相关设定 ###
+    # 股票类每笔交易时的手续费是：买入时佣金万分之三，卖出时佣金万分之三加千分之一印花税, 每笔交易佣金最低扣5块钱
+    set_order_cost(OrderCost(close_tax=0.000, open_commission=0.0000, close_commission=0.0000, min_commission=0), type='stock')
+    
+    g.securitys=[]
+    #g.securitys.append('000429.XSHE')#粤高速Ａ
+    g.securitys.append('000858.XSHE')#五粮液
+    g.securitys.append('600612.XSHG')#老凤祥
+    g.securitys.append('601318.XSHG')#中国平安
+    #g.securitys.append('002507.XSHE')#涪陵榨菜
+    g.securitys.append('600900.XSHG')#长江电力
+    g.securitys.append('600588.XSHG')#用友网络
+    #g.securitys.append('601288.XSHG')#农业银行
+    #g.securitys.append('603899.XSHG')#晨光文具
+    g.securitys.append('000651.XSHE')#格力电器
+    #g.securitys.append('601006.XSHG')#大秦铁路
+    #g.securitys.append('601857.XSHG')#中国石油
+    g.securitys.append('600585.XSHG')#海罗水泥
+    #g.securitys.append('603517.XSHG')#绝味食品
+    #g.securitys.append('159920.XSHE')#恒生ETF
+    #g.securitys.append('159902.XSHE')#中小板
+    #g.securitys.append('159915.XSHE')#创业板
+
+    
+    #g.securitys=['510880.XSHG','510050.XSHG']
+    #用于保存标的方差
+    g.fangchaList={}
+    #保存各标市值
+    g.shizhiList={}
+    #计算低波的时间段与拿在手中的天数
+    g.diboData=20
+    g.time=0
+
+    for security in g.securitys:
+        g.fangchaList[security]=0
+        
+      # 开盘时运行
+    run_daily(market_open, time='open', reference_security='000300.XSHG')
+   
+    
+#获取股票五日涨幅的方差
+def fangcha(security):
+     # 获取股票的收盘价
+    close_data = get_bars(security, count=g.diboData, unit='1d', fields=['close'])
+    #取得平均数
+    MA5 = close_data['close'].mean()
+    #for close in close_data :
+        #log.info(close['close'])
+    #log.info("平均数:%s"%(MA5))
+    #计算方差
+    s1=0
+    for close in close_data:
+        temp=float(close['close'])
+        s1=s1+(MA5-temp)*(MA5-temp)
+    s2=s1/g.diboData/(MA5*MA5)*1000
+    #log.info("方差为%s" %s2)
+    
+   #return round(s2,1)
+    return s2
+    
+#将数组升序排列
+def sortAsc(arrList,dataList):
+    for i in range(0,len(arrList)):
+        for j in range(0,len(arrList)-i-1):
+            if(dataList[arrList[j]]>dataList[arrList[j+1]]):
+                temp=arrList[j]
+                arrList[j]=arrList[j+1]
+                arrList[j+1]=temp
+    return arrList
+#计算需要卖出的标
+def needSell(newList,oldList):
+    sellList=[]
+    for i in range(0,len(oldList)):
+        temp=oldList[i]
+        if(temp==''):
+            break
+        isFind=0
+        for j in range(0,len(newList)):
+            if(newList[j]==temp):
+                isFind=1
+                break;
+            
+        if (isFind==0):
+            sellList.append(temp)
+            
+    return sellList
+#y计算需要买入的标
+def needOrder(newList,oldList):
+    orderList=[]
+    for i in range(0,len(newList)):
+        temp=newList[i]
+        isFind=0
+        for j in range(0,len(oldList)):
+            if(oldList[j]==temp):
+                isFind=1
+                break;
+            
+        if (isFind==0):
+            orderList.append(temp)
+            
+    return orderList
+## 开盘时运行函数
+def market_open(context):
+    
+    securitys = g.securitys
+    fangchaList=g.fangchaList
+    shizhiList=g.shizhiList
+    #当前所持有的标
+    currList=[]
+    
+    if(g.time==0):
+        
+        for security in securitys:
+            #计算五日方差
+            s2=fangcha(security)
+            fangchaList[security]=s2
+            #log.info("%s 方差:%s" %(security,s2))
+        
+        #按算法排序
+        sortList=sortAsc(securitys,fangchaList)
+        tempList=[]
+        tempList.append(sortList[0])
+        tempList.append(sortList[1])
+        tempList.append(sortList[2])
+        
+        cash =int( context.portfolio.available_cash)
+        currCash=int(cash/len(tempList))
+        
+        log.info("开始建仓")
+        for security in tempList :
+            statu=order_value(security, currCash)
+            if(statu!=None):
+                log.info("买入%s成功金额：%s " %(security,currCash))
+            else:
+                log.info("买入失败%s" %(security))
+                return 
+        g.time=1
+        long_positions_dict = context.portfolio.long_positions
+        for position in list(long_positions_dict.values()):  
+            print("标的:{0},总仓位:{1},标的价值:{2}, 建仓时间:{3}".format(position.security, position.total_amount, position.value, position.init_time))
+        
+        end(context)
+        return
+
+    long_positions_dict = context.portfolio.long_positions
+    for position in list(long_positions_dict.values()):  
+        shizhiList[position.security]=position.value
+        currList.append(position.security)
+        #print("标的:{0},总仓位:{1},标的价值:{2}, 建仓时间:{3}".format(position.security, position.total_amount, position.value, position.init_time))
+   
+    #按升序排序
+    sortList=sortAsc(currList,shizhiList)
+    for security in sortList :
+        log.info("标:%s 价格：%s " %(security,shizhiList[security]))
+    
+    last=len(sortList)-1
+    if( (shizhiList[ sortList[last] ]- shizhiList[sortList[0]]) / shizhiList[sortList[0]]  > 0.05):
+        money= (shizhiList[ sortList[last] ]- shizhiList[sortList[0]])/2
+        order_value(sortList[last], -money)
+        log.info("市值平横-卖出:%s,金额:%s" %(sortList[last],money))
+        cash=context.portfolio.available_cash
+        order_value(sortList[0], cash)
+        log.info("市值平横-买入:%s,金额:%s"%(sortList[0],cash))
+        
+    if(g.time% g.diboData !=0):
+        log.info("持有第%s日" %(g.time))
+        
+        end(context)
+        return 
+    
+    #log.info('函数运行时间(market_open):'+str(context.current_dt.time()))
+   
+    for security in securitys:
+        #计算五日方差
+        s2=fangcha(security)
+        fangchaList[security]=s2
+        log.info("%s 方差:%s" %(security,s2))
+    #按算法排序
+    sortList=sortAsc(securitys,fangchaList)
+    
+    temp=[]
+    temp.append(sortList[0])
+    temp.append(sortList[1])
+    temp.append(sortList[2])
+    sortList=temp
+    
+    #保存买入卖出状态
+    statu=''
+    
+    for i in range(0,len(currList)):
+        log.info("上一轮选的标%s" %( currList[i]))
+    for i in range(0,len(sortList)):
+        log.info("新一轮选的标%s" %( sortList[i]))
+    
+    sellList=needSell(sortList,currList)
+    orderList=needOrder(sortList,currList)
+    
+    for i in range (0,len(sellList)):
+        #log.info('卖出%s' %(sellList[i]))
+        statu=order_target(sellList[i], 0)
+        if(statu==None):
+            log.info("卖出%s失败" %(sellList[i]))
+            order_target(securitys[i], 0)
+        else:
+            log.info("卖出%s成功" %(sellList[i]))
+            #print("交易费用单：{0}".format(statu.commission))
+           # print("是否买单：{0}".format(statu.is_buy))
+            #print("订单状态：{0}".format(statu.status))
+           # print("订单平均成交价格：{0}".format(statu.price))
+            tempList=[]
+            for m in range(0,len( currList)):
+                if(currList[m]!=sellList[i]):
+                    tempList.append(currList[m])
+            currList=tempList
+
+    cash =int( context.portfolio.available_cash)
+    currCash=1
+    if(len(orderList)>0):
+        currCash=int(cash/len(orderList))
+    for i in range (0,len(orderList)):
+        #log.info("买入%s 金额：%s" % (orderList[i],currCash))
+        statu=order_value(orderList[i], currCash)
+        if(statu==None):
+            log.info("买入%s失败" %(orderList[i]))
+        else:
+           # print("交易费用单：{0}".format(statu.commission))
+            #print("是否买单：{0}".format(statu.is_buy))
+            #print("订单状态：{0}".format(statu.status))
+            #print("订单平均成交价格：{0}".format(statu.price))
+            log.info("买入%s成功" %(orderList[i]))
+            currList.append(orderList[i])
+    g.currList=currList
+    
+    end(context)
+   
+def end(context):
+    g.time=g.time+1
+    log.info(context.portfolio.available_cash)
+    log.info("=========================================#####################################")

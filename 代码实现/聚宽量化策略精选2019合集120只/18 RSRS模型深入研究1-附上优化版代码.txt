@@ -1,0 +1,168 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/17312
+# 标题：RSRS模型深入研究1-附上优化版代码
+# 作者：Marshal
+# 回测请选择 python 2 ，资金选择 100万 。
+
+from jqdata import *
+import pandas as pd
+import numpy as np
+import scipy.stats as stats
+import datetime
+import talib
+from jqlib.technical_analysis import *
+import math
+import statsmodels.api as sm
+
+
+# 初始化函数，设定基准等等
+def initialize(context):
+    # 设定上证指数作为基准
+    set_param(context) #初始化系统参数
+    set_rscore_param(context) # 初始化RS参数
+    set_first_run(context) #初始化运行
+    g.Trading = 'open' #'open'
+    ## 开盘前运行函数 
+    # 开盘前运行
+    run_daily(before_market_open, time='before_open', reference_security=g.security) 
+    # 开盘时运行
+    run_daily(market_open, time = g.Trading, reference_security=g.security)
+    # 收盘后运行
+    run_daily(after_market_close, time='after_close', reference_security=g.security)
+
+def set_param(context):
+    # 要操作的股票：平安银行（g.为全局变量）
+    g.security = '000300.XSHG'
+    ### 股票相关设定 ###
+    set_benchmark(g.security)
+    # 开启动态复权模式(真实价格)
+    set_option('use_real_price', True)
+    # 输出内容到日志 log.info()
+    log.info('初始函数开始运行且全局只运行一次')
+    # 股票类每笔交易时的手续费是：买入时佣金万分之三，卖出时佣金万分之三加千分之一印花税, 每笔交易佣金最低扣5块钱
+    set_order_cost(OrderCost(close_tax=0.001, open_commission=0.0003, close_commission=0.0003, min_commission=5), type='stock')
+    log.set_level('order', 'error') # 过滤掉order系列API产生的比error级别低的log
+
+def set_rscore_param(context):
+    g.N = 18
+    g.M = 1100
+    g.buy = 0.7 
+    g.sell = -0.7 
+    
+def set_first_run(context):
+    rs = RSRS_CALC(g.security,context.current_dt,g.N,g.M)
+    g.beta_list,g.rightdev_list = rs.create_base_record('2005-01-05')
+       
+def before_market_open(context):
+    # 输出运行时间
+    log.info('函数运行时间(before_market_open)：'+str(context.current_dt.time()))
+    # 给微信发送消息（添加模拟交易，并绑定微信生效）
+    send_message('美好的一天~')
+
+## 开盘时运行函数
+def market_open(context):
+    log.info('函数运行时间(market_open):'+str(context.current_dt.time()))
+    
+    stock = g.security
+    positions_value = context.portfolio.positions_value
+    total_value = context.portfolio.total_value
+    #context.portfolio.positions[stock].closeable_amount
+    # 取得当前的现金
+    cash = context.portfolio.available_cash
+    date = context.current_dt #context.previous_date 
+    
+    rs = RSRS_CALC(stock,date,g.N,g.M)
+    g.rscore = rs.calc_rscore(g.beta_list,g.rightdev_list)
+    ## 获取上下交易买卖点
+    print ('rscore%s'%g.rscore)
+    
+    if g.rscore > g.buy:
+        # 记录这次买入
+        log.info("买入 %s" % (stock))
+        # 用所有 cash 买入股票
+        order_value(stock, cash)
+        # 如果上一时间点的值小于卖出阈值, 则空仓卖出
+    elif g.rscore < g.sell and positions_value > 0:
+        # 记录这次卖出
+        log.info("卖出 %s" % (stock))
+        # 卖出所有股票,使这只股票的最终持有量为0
+        order_target(stock, 0)
+
+ 
+## 收盘后运行函数  
+def after_market_close(context):
+    log.info(str('函数运行时间(after_market_close):'+str(context.current_dt.time())))
+    #得到当天所有成交记录
+    trades = get_trades()
+    for _trade in trades.values():
+        log.info('成交记录：'+str(_trade))
+    log.info('一天结束')
+    log.info('##############################################################')
+    record(rscore=float(g.rscore))
+
+## 运行函数
+class RSRS_CALC:
+    N = 18
+    M = 1100
+    def __init__(self,security,date,N,M) :
+        self.date = date
+        self.security = security
+        self.N = N
+        self.M = M
+        
+    def get_prices(self,start_date,count) :
+        security = self.security
+        end_date = self.date
+        if count > 0 : 
+            prices = attribute_history(security, count, '1d', ['high', 'low'])
+        elif start_date is not None: 
+            prices = get_price(security = security, start_date = start_date, end_date = end_date, \
+                 frequency='daily', fields=['high', 'low'])
+        if len(prices.values)>0 :
+            highs = prices.high
+            lows = prices.low
+            return highs,lows
+        else: pass
+        
+    def calc_OLS_list(self,x,y) : #OLS线性回归
+        X = sm.add_constant(x)
+        model = sm.OLS(y,X)
+        results = model.fit()
+        return results
+    
+    def create_base_record(self,start_date = '2005-01-05'):
+        N = self.N
+        highs,lows = self.get_prices(start_date,0)
+        beta_list = []
+        rightdev_list = []
+        for i in range(N,len(highs)):
+            y = highs[i-N:i]
+            x = lows[i-N:i]
+            results = self.calc_OLS_list(x,y)
+            beta_list.append(results.params[1])
+            rightdev_list.append(results.rsquared)
+        return beta_list,rightdev_list
+    
+    def new_beta_record(self):
+        N = self.N
+        highs,lows = self.get_prices(None,N)
+        x = lows
+        y = highs
+        results = self.calc_OLS_list(x,y)
+        beta = results.params[1]
+        rightdev=results.rsquared
+        return beta,rightdev
+    
+    def calc_rscore(self,beta_list,rightdev_list):# 计算标准化的RSRS指标
+        M = self.M
+        if not (len(beta_list) > 0 or len(rightdev_list) > 0 ):
+            beta_list,rightdev_list = self.create_base_record('2005-01-05')
+        beta,rightdev = self.new_beta_record()
+        beta_list.append(beta)
+        rightdev_list.append(rightdev)
+        section = beta_list[-M:] # 计算均值序列 
+        zscore = stats.zscore(section).tolist()[-1] #序列标准分
+        #计算右偏RSRS标准分
+        zscore_rightdev= zscore*beta*rightdev
+        return zscore_rightdev

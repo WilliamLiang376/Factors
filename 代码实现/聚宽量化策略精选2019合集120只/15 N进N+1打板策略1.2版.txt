@@ -1,0 +1,458 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/20946
+# 标题：N进N+1打板策略1.2版
+# 作者：轮回天生
+# 本策略只能在tick级别的回测和模拟
+
+# 导入函数库
+from jqdata import *
+from jqlib.technical_analysis import *
+from jqdata import finance 
+import pandas as pd
+import warnings
+import numpy as np
+import datetime
+import time
+import tushare as ts
+
+# 初始化函数，设定基准等等
+def initialize(context):
+    set_option("avoid_future_data", True)
+    # 设定沪深300作为基准
+    set_benchmark('000300.XSHG')
+    # 开启动态复权模式(真实价格)
+    set_option('use_real_price', True)
+    # 为全部交易品种设定固定值滑点
+    set_slippage(FixedSlippage(0.01))
+    #开启盘口撮合
+    set_option('match_with_order_book', True)
+    # 输出内容到日志 log.info()
+    log.info('初始函数开始运行且全局只运行一次')
+    # 过滤掉order系列API产生的比error级别低的log
+    # log.set_level('order', 'error')
+
+    ### 股票相关设定 ###
+    # 股票类每笔交易时的手续费是：买入时佣金万分之三，卖出时佣金万分之三加千分之一印花税, 每笔交易佣金最低扣5块钱
+    set_order_cost(OrderCost(close_tax=0.001, open_commission=0.0003, close_commission=0.0003, min_commission=5), type='stock')
+
+    ## 运行函数（reference_security为运行时间的参考标的；传入的标的只做种类区分，因此传入'000300.XSHG'或'510300.XSHG'是一样的）
+      # 开盘前运行
+    run_daily(before_market_open, time='before_open', reference_security='000300.XSHG')
+      # 收盘后运行
+    run_daily(after_market_close, time='after_close', reference_security='000300.XSHG')
+    enable_profile()
+    g.rest = 0  #吃大面后强制休息2天
+
+## 开盘前运行函数
+def before_market_open(context):
+    print('--------------------------------新的一天：%s' % str(context.current_dt))
+    data = pd.DataFrame([])
+    if g.rest > 0:
+        g.rest -= 1
+        print('<<<<<<<<打板休息日>>>>>>>')
+    else:
+        data=countBoard(context)
+    g.pre_close = {}
+    g.dragonLeader = []
+    if data.empty:
+        g.security = []
+    else:
+        g.security = prepareStocks(data, context)
+        if 'max' in g.security:
+            g.security.remove('max')
+        if 'code' in g.security:
+            g.security.remove('code')
+        for stock in g.security:
+            price = attribute_history(stock, 1, unit='1d',fields=['close'],skip_paused=True, df=True, fq='pre')
+            g.pre_close[stock] = price.iloc[0]['close']
+    for stock in context.portfolio.positions:
+        if stock not in g.security:
+            g.security.append(stock)
+            price = attribute_history(stock, 1, unit='1d',fields=['close'],skip_paused=True, df=True, fq='pre')
+            g.pre_close[stock] = price.iloc[0]['close']
+        #如果持仓股为市场最高板，那么卖点单独处理
+        print(g.continuousBoard)
+        if stock in g.continuousBoard.iloc[-1]['code']:
+            g.dragonLeader.append(stock)
+    if g.rest == 0 and (len(g.security)>0):
+        subscribe(g.security, 'tick')
+    if len(g.dragonLeader)>0:
+        print('拿着龙头：%s' %str(g.dragonLeader))
+    
+## 收盘后运行函数
+def after_market_close(context):
+    # 取消今天订阅的标的
+    unsubscribe_all()
+    #得到当天所有成交记录
+    trades = get_trades()
+    for _trade in trades.values():
+        log.info('成交记录：'+str(_trade))
+    log.info('一天结束')
+    log.info('##############################################################')
+
+
+# 有tick事件时运行函数
+'''
+一个 tick 所包含的信息。 tick 中的信息是在 tick 事件发生时， 盘面的一个快照。
+
+code: 标的的代码
+datetime: tick 发生的时间
+current: 最新价
+high: 截至到当前时刻的最高价
+low: 截至到当前时刻的最低价
+volume: 截至到当前时刻的成交量
+amount: 截至到当前时刻的成交额
+position: 截至到当前时刻的持仓量，只适用于期货 tick 对象
+a1_v ~ a5_v: 卖一量到卖五量，对于期货，只有卖一量
+a1_p ~ a5_p: 卖一价到卖五价，对于期货，只有卖一价
+b1_v ~ b5_v: 买一量到买五量，对于期货，只有买一量
+b1_p ~ b5_p: 买一价到买五价，对于期货，只有买一价
+'''
+def handle_tick(context, tick):
+    if len(g.security) and g.rest==0:
+        hitBoard(context, tick)
+    nuke(context,tick)
+
+
+#暂时使用翻绿或者尾盘不涨停卖点
+def nuke(context, tick):
+    hour = context.current_dt.hour
+    minute = context.current_dt.minute
+    stock = tick.code
+    if hour==9 and minute<30:
+        return
+    curPositions = context.portfolio.positions
+    if len(curPositions) == 0 or tick.code not in curPositions\
+     or curPositions[stock].closeable_amount<=0:
+        return
+
+    current_data = get_current_data()
+    high_limit = current_data[stock].high_limit
+    limit_low = current_data[stock].low_limit
+    dayOpen =  current_data[stock].day_open
+    #跌停没法卖
+    if tick.current == limit_low:
+        return
+     #统计当天最高价
+    barCnt = (hour-9)*4+int(minute/15)
+    barsOf15Min = get_bars(tick.code, barCnt, unit='15m',fields=['high'],include_now=True)
+    dayHigh = max(barsOf15Min['high'])
+    
+    isDragonLeader =len(g.dragonLeader)>0 and str(tick.code) in g.dragonLeader
+    if isDragonLeader:
+        dragonPrice = attribute_history(stock, 5, unit='1d',fields=[ 'close'],skip_paused=True, df=True, fq='pre')
+        #6板及以上才这么卖，否则使用下面的卖法
+        if dayHigh/dragonPrice.iloc[0]['close']>1.77:
+            sellIfGreen(tick)
+            sellIfNotBoard(tick, hour, minute, high_limit)
+            return #独立卖法要return，不然就执行下面的卖法去了
+
+    if dayOpen<curPositions[tick.code].avg_cost*0.9:
+        g.rest = 2
+        bigNoodlePrice = attribute_history(stock, 1, unit='1d',fields=[ 'low'],skip_paused=True, df=True, fq='pre')
+        priceToSell = bigNoodlePrice.iloc[0]['low']*0.98
+        if tick.current >= priceToSell or hour>14:
+            print('吃大面，强制休息2天'+str(stock))
+            order_target(stock, 0)
+            if stock not in curPositions:
+                log.info('卖出股票:' + str(stock))
+        #独立卖法要return，不然就执行下面的卖法去了
+        return
+     #绿盘卖
+    sellIfGreen(tick, curPositions)
+    #最高价回撤超过4%卖
+    if tick.current<=dayHigh*0.96 :
+        print('最高价回撤超过4%卖'+str(stock))
+        order_target(stock, 0)
+        if stock not in curPositions:
+            log.info('卖出股票:' + str(stock))
+    #亏损超过5%止损
+    if curPositions[tick.code].price<curPositions[tick.code].avg_cost*0.95:
+        print('止损卖'+str(stock))
+        order_target(stock, 0)
+        if stock not in curPositions:
+            log.info('卖出股票:' + str(stock))
+    
+    #收盘不涨停卖
+    sellIfNotBoard(tick, hour, minute, high_limit)
+    #半分钟跌幅超过3%卖，一个Tick是3秒
+    tickPrice = get_ticks(stock,end_dt=tick.datetime, count=20, fields=[ 'current'])
+    minMax = max(tickPrice['current'])
+    if tick.current<minMax*0.97 and tick.current<dayOpen:
+        print('半分钟跌幅超过3%卖'+str(stock))
+        order_target(stock, 0)
+        if stock not in curPositions:
+            log.info('卖出股票:' + str(stock))
+
+def sellIfGreen(tick, curPositions):
+    if tick.current<g.pre_close[tick.code]:
+        print('绿盘卖'+str(tick.code))
+        order_target(tick.code, 0)
+        if tick.code not in curPositions:
+            log.info('卖出股票:' + str(tick.code))
+
+def sellIfNotBoard(tick, hour, minute, high_limit): 
+    if hour==14 and minute==55 and tick.current!=high_limit:
+        print('收盘不涨停卖'+str(tick.code))
+        order_target(tick.code, 0)
+        if tick.code not in curPositions:
+            log.info('卖出股票:' + str(stock))
+
+def prepareStocks(data, context):
+    secondBoardStocks = data.iloc[-1]
+    secondBoardStocks = secondBoardStocks[secondBoardStocks==2]
+    secondBoardStocks = secondBoardStocks.index.tolist()
+    
+    #过滤掉MA20往下走的
+    stocks = []
+    if len(secondBoardStocks)>0:    
+        curMA20 = MA(secondBoardStocks, check_date=context.current_dt, timeperiod=20)
+        preMA20 = MA(secondBoardStocks, check_date=context.previous_date, timeperiod=20)
+        for stock in secondBoardStocks:
+            if curMA20[stock]>preMA20[stock]:
+                stocks.append(stock)
+            else:
+                print('过滤掉的二板股：%s' % stock)
+    return secondBoardStocks
+
+def hitBoard(context, tick):
+    hour = context.current_dt.hour
+    minute = context.current_dt.minute
+    if hour==9 and minute<30:
+        return
+    #最迟14点收工
+    if hour>11:
+        return
+    stock = tick.code 
+    current_data = get_current_data()   
+    high_limit = current_data[stock].high_limit
+    day_open = current_data[stock].day_open
+    if tick.current == high_limit:
+        return
+    # 取得当前的现金
+    cash = context.portfolio.available_cash
+    now_price = tick.current
+
+    hitPoint = 0.02
+    if now_price<10:
+        hitPoint = 0.01
+    #模拟交易可以涨停买入
+    #if now_price==high_limit:
+    if now_price >= high_limit-hitPoint:
+         #T字板买入
+        if day_open==high_limit:            
+            #统计当天最高价
+            barCnt = (hour-9)*4+int(minute/15)
+            barsOf15Min = get_bars(tick.code, barCnt, unit='15m',fields=['low'],include_now=True)
+            dayLow = min(barsOf15Min['low'])
+            #开板时间要大于30秒
+            tickPrice = get_ticks(stock,end_dt=tick.datetime, count=10, fields=[ 'current'])            
+            #开板跌幅小于1%，不考虑。如果开板后跌幅大于1%，现在又回到了涨停价，那么可以买
+            if dayLow>high_limit*0.99 and tickPrice['current'][0]==high_limit:
+                return
+            print('T字买入%s' % stock)
+        if stock not in context.portfolio.positions and context.portfolio.available_cash > high_limit*100:
+            order_count = (int(context.portfolio.available_cash / (high_limit*100))) * 100
+            if  context.portfolio.available_cash < context.portfolio.total_value*0.6: 
+                print('all in-----------------------')
+                order_target(stock, order_count)
+            else:
+                print('buy 1/2----------------------------------')
+                order_target(stock, int(order_count/2))
+            log.info('买入股票:' + str(stock) +', 金额:'+ str(context.portfolio.positions[stock].value))
+            print(context.portfolio.positions)
+   
+
+    return
+
+'''
+计算龙头强度和退潮期
+最高板>=6板开盘幅度为0-3%打N-3板，绿盘开盘打N-3板，否则可打第二梯队
+最高板<6板开盘幅度为0-3%打N-3板，绿盘开盘打1进2，否则可以打第二梯队
+统计昨日2进3炸板率，大于60%则休息
+当全场梯队只有一个高度，剩下全是2板的时候，第一个三板就是新周期龙头
+'''
+def calcPeriodStrength(data):
+
+    dragonLeaders=data['code']
+    return
+
+
+def countBoard(context):
+    print('\n-------------开始统计连板数-------------')
+    startTime = time.clock()
+    #结束统计日期
+    endDate = str(context.previous_date)
+    #开始统计日期
+    startDate = (context.previous_date+datetime.timedelta(days=-50)).strftime("%Y-%m-%d")
+    tradeDates = get_price('399001.XSHE', start_date=startDate, end_date=endDate, \
+                                    frequency='daily', fields=['open'],\
+                                    skip_paused=True, fq='pre')
+    tradeDates = tradeDates.index.tolist()
+    #-----------TODO调试代码-----------
+    #开始统计，如果是次新，那么就去除前20天的数据，这里只统计2018至今的连板
+    #取得市值符合条件的股票
+    stocks = get_fundamentals(query(
+            valuation.code, valuation.market_cap, valuation.pe_ratio, income.total_operating_revenue
+        ).filter(
+            valuation.circulating_market_cap < 50,
+            valuation.circulating_market_cap > 5
+        ).order_by(
+            # 按市值降序排列
+            valuation.circulating_market_cap.desc()
+        ), date = endDate)
+    stocks = stocks['code'].tolist()
+
+    #连板统计结果
+    continuousBoard = pd.DataFrame([], index=tradeDates)
+    print('日期和股票准备就绪，耗时%.2f' % (time.clock()-startTime) )
+
+    for i in range(30, len(tradeDates)):
+        #-----------统计当天最高的连板天数----------------------
+        day = tradeDates[i]
+        dayProcessTime = time.clock()
+        callServerTime = 0
+        countUpLimitTime = 0
+        cnt = 0
+        for stock in stocks:
+            #print('正在处理：%s %s' % (day, stock))
+            #获取历史行情，如果有停牌，那么这个startDate就不能这么取，默认多取20条，
+            #也就是停牌超过10交易日很可能就没法统计了
+            startDate = tradeDates[0]
+            if tradeDates.index(day) > 30:
+                startDate = tradeDates[tradeDates.index(day)-30]
+            callServerStart = time.clock()
+            historyPrice = attribute_history(stock, 50, unit='1d',fields=['open', 'close', 'high', 'low', 'high_limit'],skip_paused=True, df=True, fq='pre')
+            callServerTime = callServerTime+time.clock()-callServerStart
+            #如果提前30天取数据还不够15条，那么说明停牌时间过长，不在考虑范围
+            if historyPrice.shape[0] < 15:
+                continue
+            latestRow = historyPrice.tail(1)
+            #如果最新一条数据不是当天数据，那么是停牌，不统计
+            if day not in latestRow.index:
+                continue
+            countUpLimitStart = time.clock()
+            #计算每天个股的连板数
+            cnt = countUpLimit(historyPrice, day, stock)
+            if cnt >= 2:
+                if stock not in continuousBoard.columns:
+                    continuousBoard[stock] = [0]*continuousBoard.shape[0]
+                continuousBoard.loc[day, stock] = cnt  #这个loc非常耗时，无用数据就别存了
+            
+        progress = ((i-29)/(len(tradeDates)-30))*100
+        remainingTime = (time.clock()-dayProcessTime)*(len(tradeDates)-i)
+        remainingTime = remainingTime/60
+        dayProcessTime = time.clock()-dayProcessTime
+        print('%s日处理耗时：%.2f秒=>get_price耗时：%.2f秒，进度：%d%%，预计剩余时间：%.2f分钟' % \
+            (day.strftime("%Y-%m-%d"), dayProcessTime, callServerTime, progress, remainingTime))
+    #计算每天的最高连板数
+    continuousBoard = continuousBoard[continuousBoard>=2]    
+    continuousBoard = continuousBoard.dropna(axis=0, how='all')  
+    continuousBoard = continuousBoard.dropna(axis=1, how='all') 
+    continuousBoard = continuousBoard.fillna(0)
+    continuousBoard['max'] = continuousBoard.max(axis=1)
+    continuousBoard = continuousBoard.apply(lambda x:calcMaxIndex(x),axis=1)
+    #由于上面公式添加列名之后没有新加列名字，默认为0，所以要替换掉最后一个列名
+    cols = continuousBoard.columns.tolist()
+    cols[len(cols)-1] = 'code'
+    continuousBoard.columns = cols
+    g.continuousBoard = continuousBoard #保存到全局变量，以便计算龙头强度
+    
+    '''
+     #昨天连板数据
+    originalCntBoards=countBoards = continuousBoard.iloc[-1].tolist()
+    countBoards = list(set(countBoards)) #连板数量
+    countBoards.sort()
+    ladder1Boards = countBoards[-1] #第一梯队连板数
+    ladder2Boards = countBoards[-2] #第二梯队连板数
+    ladder1StockCount=originalCntBoards.count(ladder1Boards)    #第一梯队个股数量
+    ladder2StockCount=originalCntBoards.count(ladder2Boards)    #第二梯队个股数量
+    ladder1Stocks=continuousBoard.iloc[-1]['code']    #第一梯队个股
+    #由于最高板数是存放在max列里面，为了方便起见，计算第二梯队的时候修改max的值，用完后再改回去
+    continuousBoard.loc[-1,'max'] = ladder2Boards
+    continuousBoard.drop(['code'], axis=1)
+    continuousBoard = continuousBoard.apply(lambda x:calcMaxIndex(x),axis=1)
+    cols = continuousBoard.columns.tolist()
+    cols[len(cols)-1] = 'code'
+    continuousBoard.columns = cols
+    ladder2Stocks=continuousBoard.iloc[-2]['code']     #第二梯队个股
+    #还原数据
+    continuousBoard.loc[-1,'max'] = ladder1Boards
+    continuousBoard.drop(['code'], axis=1)
+    continuousBoard = continuousBoard.apply(lambda x:calcMaxIndex(x),axis=1)
+    cols = continuousBoard.columns.tolist()
+    cols[len(cols)-1] = 'code'
+    continuousBoard.columns = cols
+    print('昨日连板梯队')
+    print('ladder1Stocks: %s' %ladder1Stocks)
+    print('ladder2Stocks: %s' %ladder2Stocks)
+    '''
+    print(continuousBoard)
+
+
+    return continuousBoard
+
+
+#是否是一字板
+def isYZB(data, i):
+    if data.iloc[i]['open'] == data.iloc[i]['low'] \
+    and data.iloc[i]['open'] == data.iloc[i]['close'] \
+    and data.iloc[i]['open'] == data.iloc[i]['high_limit'] \
+    and data.iloc[i]['close']/data.iloc[i-1]['close'] > 1.09:
+        return True
+    return False
+
+#是否是涨停
+def isUpLimit(data, i):
+    if data.iloc[i]['high_limit'] == data.iloc[i]['close']\
+    and data.iloc[i]['close']/data.iloc[i-1]['close'] > 1.09 :
+        return True
+    return False
+
+#计算涨停数
+def countUpLimit(data, day, stock):
+    #最后一条数据索引
+    lastIndex = data.shape[0]-1
+    if not isUpLimit(data, lastIndex):
+        return 0
+    i = lastIndex
+    upLimitCnt = 0
+    while i >= 0:
+        if isUpLimit(data, i):
+            upLimitCnt += 1
+            i -= 1
+        else:
+            break
+    #如果涨停前面几天都是一字板，那么不算，从可以买入的那天开始算
+    firstUpLmt = lastIndex-upLimitCnt+1
+    i = firstUpLmt
+    while i < lastIndex:
+        if isYZB(data, i):
+            upLimitCnt -= 1  #减去一字板个数
+            i += 1
+        else:
+            break
+    return upLimitCnt
+
+#计算最大值所在列名        
+def calcMaxIndex(row):#对每一行处理的函数
+    maxValues = row[row==row['max']].dropna(how='all')
+    codes = maxValues.index.tolist()
+    codes.remove('max')
+    row['code'] = codes
+    return row
+
+#格式化tushare日期为聚宽格式
+def formatTSDateToJoint(data):
+    for i in range(len(data)):
+        item = data[i]
+        data[i] = item[0:4]+'-'+item[4:6]+'-'+item[6:8]
+    return data
+
+def formatDate(data):
+    for i in range(len(data)):
+        data[i] = data[i][:10]
+        
+    return data
+

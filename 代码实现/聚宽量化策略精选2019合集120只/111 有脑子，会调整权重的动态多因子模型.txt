@@ -1,0 +1,579 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/21275
+# 标题：有脑子，会调整权重的动态多因子模型
+# 作者：fireflytxy
+
+# 导入函数库
+
+import jqdata
+from jqdata import *
+
+from jqfactor import Factor, calc_factors
+import math
+import statsmodels.api as sm
+
+import datetime
+import time
+
+
+
+import pandas as pd
+import numpy as np
+
+#import matplotlib.pyplot as plt
+from sklearn.metrics import mean_absolute_error, make_scorer
+from sklearn.preprocessing import StandardScaler
+from sklearn.grid_search import GridSearchCV
+from scipy.sparse import csr_matrix, hstack
+from sklearn.cross_validation import KFold, train_test_split
+
+
+
+import scipy.stats as stats
+import scipy.optimize as opt
+
+
+
+
+# 初始化函数，设定基准等等
+def initialize(context):
+    set_option("avoid_future_data", True)
+    
+    context.limit = 100
+    
+    
+    #scheduler.run_daily(machine_learning(context.now-datetime.timedelta(7), a = 6))
+    context.OBSERVATION=20
+    context.stocks= []
+    
+    context.count_day = 0
+    g.stocknum = 15
+    # 设定沪深300作为基准
+    
+    set_benchmark('000300.XSHG')
+    # 开启动态复权模式(真实价格)
+    set_option('use_real_price', True)
+    # 输出内容到日志 log.info()
+    log.info('初始函数开始运行且全局只运行一次')
+    # 过滤掉order系列API产生的比error级别低的log
+    # log.set_level('order', 'error')
+    
+    ### 股票相关设定 ###
+    
+    
+    
+    # 股票类每笔交易时的手续费是：买入时佣金万分之三，卖出时佣金万分之三加千分之一印花税, 每笔交易佣金最低扣5块钱
+    set_order_cost(OrderCost(close_tax=0.001, open_commission=0.0003, close_commission=0.0003, min_commission=5), type='stock')
+    
+    ## 运行函数（reference_security为运行时间的参考标的；传入的标的只做种类区分，因此传入'000300.XSHG'或'510300.XSHG'是一样的）
+      # 开盘前运行
+    run_daily(before_market_open, time='before_open', reference_security='000300.XSHG') 
+      # 开盘时运行
+    run_daily(market_open, time='open', reference_security='000300.XSHG')
+      # 收盘后运行
+    run_daily(after_market_close, time='after_close', reference_security='000300.XSHG')
+
+    
+## 开盘前运行函数     
+def before_market_open(context):
+    # 输出运行时间
+    log.info('函数运行时间(before_market_open)：'+str(context.current_dt.time()))
+
+    if context.count_day%10 ==0: 
+        
+        stock_list1 = get_index_stocks('000905.XSHG') + get_index_stocks('000300.XSHG')
+        #10个交易日训练一次新的模型
+        #获取交易日
+        today = context.current_dt
+        StartDate = today-datetime.timedelta(130)  #改了
+        EndDate = today - datetime.timedelta(1)  #改了
+        trading_dates = jqdata.get_trade_days(start_date=StartDate, end_date=EndDate) #, count=None
+        
+        
+        
+        IC,stock_data = get_data(context,stock_list1,trading_dates[-1],trading_dates[-11],trading_dates[-31])
+        
+
+        #data_matrix = data.values
+        for i in range(1,6):
+            
+            date1 = trading_dates[-(10 * i + 1 )]
+            date2 = trading_dates[-(10 * i + 11 )]
+            #date3 = trading_dates[-(10 * i + 16 )]
+            date3 = trading_dates[-(10 * i + 31 )]
+            temp_IC,temp_data = get_data(context,stock_list1,date1,date2,date3)   
+            IC = IC.append(temp_IC)
+            #data_matrix = np.row_stack((data_matrix,temp_data.values))
+            #print temp_IC
+        IC.columns =  ['cap','pe','bp','roe','turnover_ratio','increase','price_change_20days']
+        print(IC)
+        #print IC
+        #选取负向因子和正向因子
+        negative_factor = []
+        positive_factor = []
+        #负向因子
+        PE = IC.pe[0:5]
+        if len(PE[PE != 0]) >=3:
+            IC_pe = PE.mean()
+            if IC_pe >0:
+                positive_factor.append('pe')
+            else:
+                negative_factor.append('pe')
+        else:
+            IC_pe = 0
+        
+                
+        #正向因子
+        BP = IC.bp[0:5]
+        if len(BP[BP != 0]) >=3:
+            IC_bp = BP.mean()
+            if IC_bp >0:
+                positive_factor.append('bp')
+            else:
+                negative_factor.append('bp')
+        else:
+            IC_bp = 0
+                
+        #正向？
+        Turn_Over_Rate = IC.turnover_ratio[0:5]
+        if len(Turn_Over_Rate[Turn_Over_Rate != 0 ] )>3:
+            IC_turn_over = Turn_Over_Rate.mean()
+            if IC_turn_over >0:
+                positive_factor.append('turnover_ratio')
+            else:
+                negative_factor.append('turnover_ratio')
+        else:
+            IC_turn_over = 0
+         
+        #负向
+        Cap = IC.cap[0:5]
+        if len(Cap[Cap != 0]) >=3:
+            IC_cap = Cap.mean()
+            if IC_cap >0:
+                positive_factor.append('cap')
+            else:
+                negative_factor.append('cap')
+        else:
+            IC_cap = 0
+        
+        #正向
+        Increase = IC.increase[0:5]
+        if len(Increase[Increase != 0]) >=3:
+            IC_increase = Increase.mean()
+            if IC_increase >0:
+                positive_factor.append('increase')
+            else:
+                negative_factor.append('increase')
+        else:
+            IC_increase = 0
+        
+        #正向
+        Roe = IC.roe[0:5]
+        if len(Roe[Roe != 0]) >=3:
+            IC_roe = Roe.mean()  
+            if IC_roe >0:
+                
+                positive_factor.append('roe')
+            else:
+                negative_factor.append('roe')
+        else:
+            IC_roe = 0
+                
+        '''
+        #动量 负向
+        Momentum5 = IC.price_change_5days[0:5]
+        if len(Momentum5[Momentum5 != 0]) >=3:
+            IC_momentum5 = Momentum5.mean()
+            if IC_momentum5 >0:    
+                positive_factor.append('price_change_5days')
+            else:
+                negative_factor.append('price_change_5days')
+            
+        else:
+            IC_momentum5 = 0
+            
+        '''    
+        Momentum10 = IC.price_change_20days[0:5]
+        if len(Momentum10[Momentum10 != 0]) >=3:
+            IC_momentum10 = Momentum10.mean()
+            if IC_momentum10 >0:
+                positive_factor.append('price_change_20days')
+            else:
+                negative_factor.append('price_change_20days')
+         
+        else:
+            IC_momentum10 = 0  
+        
+        
+            
+        weight = {'pe':IC_pe,'bp':IC_bp,'turnover_ratio':IC_turn_over,'cap':IC_cap,'increase':IC_increase,'roe':IC_roe,'price_change_20days':IC_momentum10 }
+        
+        #stock_list = 
+        
+        #获取当前的交易数据
+        current_factor = get_factor(stock_list1,trading_dates[-1],trading_dates[-21])
+        
+        df_positive = current_factor[positive_factor]
+        df_negative = current_factor[negative_factor]
+        factors = positive_factor + negative_factor
+        
+        sum_weight = 0
+        for factor in factors:
+            sum_weight = sum_weight + abs(weight[factor])
+        
+           
+        for factor in df_positive.columns.tolist():#越高越好
+            df_positive.sort_values(factor,inplace=True)
+            df_positive[factor]=abs(weight[factor])/sum_weight * np.linspace(1,len(df_positive),len(df_positive))
+            
+        
+        for factor in df_negative.columns.tolist():#越高越好
+            df_negative.sort_values(factor,inplace=True)
+            df_negative[factor]=abs(weight[factor])/sum_weight * np.linspace(len(df_negative),1,len(df_negative))
+            
+        df_positive.sort_index(inplace=True)
+        df_negative.sort_index(inplace=True)
+        
+        fundamental_df_rank=df_negative.join(df_positive)
+        
+        ranking = fundamental_df_rank.apply(sum,axis = 1)
+        if len(ranking)>10:
+            ranking = ranking.sort_values()[-15:]
+            context.stocks = ranking.index.tolist()
+            
+        else:
+            context.stocks = []
+            
+        print(context.stocks)
+
+    # 要操作的股票：平安银行（g.为全局变量）
+    #g.security = '000001.XSHE'
+
+'''
+def get_industry_exposure(order_book_ids):
+    SHENWAN_INDUSTRY_MAP = {
+        "801010": "农林牧渔",
+        "801020": "采掘",
+        "801030": "化工",
+        "801040": "钢铁",
+        "801050": "有色金属",
+        "801080": "电子",
+        "801110": "家用电器",
+        "801120": "食品饮料",
+        "801130": "纺织服装",
+        "801140": "轻工制造",
+        "801150": "医药生物",
+        "801160": "公用事业",
+        "801170": "交通运输",
+        "801180": "房地产",
+        "801200": "商业贸易",
+        "801210": "休闲服务",
+        "801230": "综合",
+        "801710": "建筑材料",
+        "801720": "建筑装饰",
+        "801730": "电气设备",
+        "801740": "国防军工",
+        "801750": "计算机",
+        "801760": "传媒",
+        "801770": "通信",
+        "801780": "银行",
+        "801790": "非银金融",
+        "801880": "汽车",
+        "801890": "机械设备"
+    }
+    df = pd.DataFrame(index=SHENWAN_INDUSTRY_MAP.keys(), columns=order_book_ids)
+    for stk in order_book_ids:
+        for hangye in SHENWAN_INDUSTRY_MAP.keys():
+            if stk in get_industry_stocks(hangye):
+                try:
+                    df[stk][hangye] = 1
+
+                except:
+                    continue
+    return df.fillna(0)#将NaN赋为0
+'''
+def get_industry_exposure(order_book_ids):
+    SHENWAN_INDUSTRY_MAP = {
+        "801010": "农林牧渔",
+        "801020": "采掘",
+        "801030": "化工",
+        "801040": "钢铁",
+        "801050": "有色金属",
+        "801080": "电子",
+        "801110": "家用电器",
+        "801120": "食品饮料",
+        "801130": "纺织服装",
+        "801140": "轻工制造",
+        "801150": "医药生物",
+        "801160": "公用事业",
+        "801170": "交通运输",
+        "801180": "房地产",
+        "801200": "商业贸易",
+        "801210": "休闲服务",
+        "801230": "综合",
+        "801710": "建筑材料",
+        "801720": "建筑装饰",
+        "801730": "电气设备",
+        "801740": "国防军工",
+        "801750": "计算机",
+        "801760": "传媒",
+        "801770": "通信",
+        "801780": "银行",
+        "801790": "非银金融",
+        "801880": "汽车",
+        "801890": "机械设备"
+    }
+    df = pd.DataFrame(index=SHENWAN_INDUSTRY_MAP.keys(), columns=order_book_ids)
+    for hangye in SHENWAN_INDUSTRY_MAP.keys():
+        hangye_stock_list = get_industry_stocks(hangye)
+        for stk in order_book_ids:
+        
+            if stk in hangye_stock_list:
+                try:
+                    df[stk][hangye] = 1
+
+                except:
+                    continue
+    return df.fillna(0)#将NaN赋为0
+
+def neutralization(factor,mkt_cap = False, industry = True):
+    y = factor
+    if type(mkt_cap) == pd.Series:
+        LnMktCap = mkt_cap.apply(lambda x:math.log(x))
+        if industry: #行业、市值
+            dummy_industry = get_industry_exposure(factor.index)
+            x = pd.concat([LnMktCap,dummy_industry.T],axis = 1)
+        else: #仅市值
+            x = LnMktCap
+        df = pd.concat([y,x],axis = 1)
+    elif industry: #仅行业
+        dummy_industry = get_industry_exposure(factor.index)
+        x = dummy_industry.T
+        df = pd.concat([y,x],axis = 1)
+    df = df.dropna()
+    y = df.iloc[:,0]
+    x = df.iloc[:,1:]
+    result = sm.OLS(y.astype(float),x.astype(float)).fit()
+    return result.resid
+
+
+
+def get_data(context,stock_list, Date, date2,date3):  #Date\date2\date4分别为 所选日期当前价格，当前十个交易日前日期
+    
+    #securities = stock_list
+    stock_list = filter_paused_stock(stock_list)
+    stock_list = filter_st_stock(stock_list)
+    #stock_list = filter_new(stock_list)
+    
+    df = get_fundamentals(query(
+          valuation.code, valuation.market_cap, valuation.pe_ratio,valuation.pb_ratio,indicator.roe,
+    valuation.turnover_ratio,indicator.inc_total_revenue_year_on_year
+    
+
+      ).filter(
+          valuation.code.in_(stock_list),
+          
+          
+      ), date=date2)
+      
+    df.index = df.code
+    df = df.iloc[:,1:]
+    df = df.dropna()  
+    
+    
+    
+    ###基本面因子
+    cap = df['market_cap']
+    cap = np.log(cap.astype(np.float64)) 
+    cap = 	neutralization(cap)
+    
+    pe_ratio = df['pe_ratio']
+    pe_ratio[pe_ratio<0] = 200
+    pe_ratio = 	neutralization(pe_ratio,df['market_cap'])
+    
+    BP_ratio = 1/df['pb_ratio']
+    #BP_ratio = filter_extreme_3sigma(BP_ratio)
+    BP_ratio = 	neutralization(BP_ratio,df['market_cap'])
+    
+    roe = df['roe']
+    #roe = filter_extreme_3sigma(roe)
+    roe = neutralization(roe,df['market_cap'])
+    
+    turnover_ratio	= df['turnover_ratio']
+    #turnover_ratio	=  neutralization(turnover_ratio)
+    
+    increase = df['inc_total_revenue_year_on_year']
+    #increase = filter_extreme_3sigma(increase)
+    increase = neutralization(increase,df['market_cap'])
+    
+    
+    
+    ###价格因子
+    price_now = get_price(stock_list, end_date=Date, frequency='daily', fields='close', count=1)['close'].T
+    price_now.columns = ['price']
+    price_10days = get_price(stock_list, end_date=date2, frequency='daily', fields='close', count=1)['close'].T
+    price_10days.columns = ['price']
+    price_30days = get_price(stock_list, end_date=date3, frequency='daily', fields='close', count=1)['close'].T
+    price_30days.columns = ['price']
+    
+    predict_price_change = price_now/price_10days - 1
+    predict_price_change = neutralization(predict_price_change)   #这里对市值中性的话就市值因子全部无效了
+    price_change_20days = price_10days/price_30days - 1
+    price_change_20days = neutralization(price_change_20days,df['market_cap'])
+
+
+    input_data = pd.concat([cap,pe_ratio],axis = 1)   
+    input_data = pd.concat([input_data,BP_ratio],axis = 1)   
+    input_data = pd.concat([input_data,roe],axis = 1)
+    input_data = pd.concat([input_data,turnover_ratio],axis = 1)
+    
+
+    input_data = pd.concat([input_data,increase],axis = 1)
+    
+
+    input_data = pd.concat([input_data,price_change_20days],axis = 1)
+
+    input_data = pd.concat([input_data,predict_price_change],axis = 1)
+   
+    
+    input_data.columns = ['cap','pe','bp','roe','turnover_ratio','increase','price_change_20days','price_change']
+    data_matrix = input_data.values
+    dic = {}
+    for i in range(len(input_data.columns)-1):
+        dat1 = data_matrix[:,i] 
+        #求第七列price——change
+        
+        #print dat1[0:5]
+        dat2 = data_matrix[:,-1]
+        cor, pval = stats.spearmanr(dat1, dat2)
+        if pval<=0.1:
+            dic[i] = cor
+        else:
+            dic[i] = 0
+    IC = pd.DataFrame(dic,index = [Date])
+    return IC,input_data
+
+
+
+
+def get_factor(stock_list, date1, date2):  #date1为当前日期 date2 为二十天前
+    
+    #securities = stock_list
+    stock_list = filter_paused_stock(stock_list)
+    stock_list = filter_st_stock(stock_list)
+    #stock_list = filter_new(stock_list)
+    
+    df = get_fundamentals(query(
+          valuation.code, valuation.market_cap, valuation.pe_ratio,valuation.pb_ratio,indicator.roe,
+    valuation.turnover_ratio,indicator.inc_total_revenue_year_on_year
+    
+
+      ).filter(
+          valuation.code.in_(stock_list),
+          valuation.pe_ratio >0
+          
+      ), date=date1)
+      
+    df.index = df.code
+    df = df.iloc[:,1:]
+    df = df.dropna()  
+    
+    ###基本面因子
+    cap = df['market_cap']
+    cap = np.log(cap.astype(np.float64)) 
+    cap = neutralization(cap)
+    
+    pe_ratio = df['pe_ratio']
+    #pe_ratio = filter_extreme_3sigma(pe_ratio)
+    pe_ratio = neutralization(pe_ratio,df['market_cap'])
+    
+    BP_ratio = 1/df['pb_ratio']
+    #BP_ratio = filter_extreme_3sigma(BP_ratio)
+    BP_ratio = 	neutralization(BP_ratio,df['market_cap'])
+    
+    roe = df['roe']
+    
+    #roe = filter_extreme_3sigma(roe)
+    roe = neutralization(roe)
+    #roe = 	neutralization(roe,df['market_cap'])
+    
+    
+    turnover_ratio	= df['turnover_ratio']
+    #turnover_ratio	=  neutralization(turnover_ratio)
+    
+    increase = df['inc_total_revenue_year_on_year']
+    #increase = filter_extreme_3sigma(increase)
+    increase = neutralization(increase,df['market_cap'])
+    
+    
+    
+    ###价格因子
+    price_now = get_price(stock_list, end_date=date1, frequency='daily', fields='close', count=1)['close'].T
+    price_now.columns = ['price']
+    price_20days = get_price(stock_list, end_date=date2, frequency='daily', fields='close', count=1)['close'].T
+    price_20days.columns = ['price']
+    
+    
+    price_change_20days = price_now/price_20days - 1
+    price_change_20days = neutralization(price_change_20days,df['market_cap'])
+    
+
+
+    input_data = pd.concat([cap,pe_ratio],axis = 1)   
+    input_data = pd.concat([input_data,BP_ratio],axis = 1)   
+    input_data = pd.concat([input_data,roe],axis = 1)
+    input_data = pd.concat([input_data,turnover_ratio],axis = 1)
+    
+
+    input_data = pd.concat([input_data,increase],axis = 1)
+    
+
+    input_data = pd.concat([input_data,price_change_20days],axis = 1)
+  
+    input_data.columns = ['cap','pe','bp','roe','turnover_ratio','increase','price_change_20days']
+    
+    return input_data
+    
+## 开盘时运行函数
+def market_open(context):
+    if context.count_day % 10 == 0:
+        for stock in context.portfolio.positions:
+            if (stock not in context.stocks) and (context.portfolio.positions[stock].closeable_amount > 0 ):
+                order_target(stock, 0)
+        
+        if len(context.portfolio.positions) < g.stocknum :
+            Num = g.stocknum - len(context.portfolio.positions)
+            Cash = context.portfolio.cash/Num
+        else: 
+            Cash = 0
+
+        ## 选股
+        stock_list = context.stocks
+
+        ## 买入股票
+        for stock in stock_list:
+            if len(context.portfolio.positions.keys()) < g.stocknum and context.portfolio.positions[stock].closeable_amount == 0 :
+                order_value(stock, Cash)
+                
+        
+        
+ 
+## 收盘后运行函数  
+def after_market_close(context):
+    context.count_day += 1 
+    trades = get_trades()
+    for _trade in trades.values():
+        log.info('成交记录：'+str(_trade))
+    log.info('一天结束')
+    
+    
+
+def filter_paused_stock(stock_list):
+    current_data = get_current_data()
+    return [stock for stock in stock_list if not current_data[stock].paused]
+
+
+def filter_st_stock(stock_list):
+    current_data = get_current_data()
+    return [stock for stock in stock_list if not current_data[stock].is_st]

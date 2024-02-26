@@ -1,0 +1,201 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/20410
+# 标题：银行股价值定投
+# 作者：歆宝
+
+'''
+　　　　　　　　　　　　　　　低位建底仓，金字塔抄底降成本，翻倍后逃顶
+－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－
+1、当20日均线在250日均线和500日均线下面，拐头向上时，抄底买入底仓。
+2、采用金字塔模式设置网摊低持仓成本。
+3、在股价翻倍后，如10日均线回调卖出部仓位。
+4、标的可以自已人工选十多个
+－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－
+'''
+## 初始化函数，设定要操作的股票、基准等等
+def initialize(context):
+    set_option("avoid_future_data", True)
+    # 过滤掉order系列API产生的比error级别低的log
+    log.set_level('order', 'error')
+    # 定义目标股票
+    g.security = ['000001.XSHE','002142.XSHE','600000.XSHG','600015.XSHG',
+                  '600016.XSHG','600036.XSHG','601009.XSHG','601166.XSHG',
+                  '601169.XSHG','601288.XSHG','601328.XSHG','601398.XSHG',
+                  '601818.XSHG','601939.XSHG','601988.XSHG','601998.XSHG']
+#    g.security = get_index_stocks('000134.XSHG')
+    # 设定上次金字塔补仓价格数组
+    g.last_price_bc = {}
+    # 设定上次网格交易价格数组
+    g.last_price_wg = {}
+    # 设定上次各类交易价格数组
+    g.last_price = {}
+    # 设定初始买入价格数组
+    g.start_price = {}
+    # 设定总投入资金数组
+    g.total_value = {}
+    # 设定买入次数
+    g.total_count = {}
+    # 设定持仓天数
+    g.days = {}
+    # 设定沪深300作为基准
+    set_benchmark('000300.XSHG')
+    # True为开启动态复权模式，使用真实价格交易
+    set_option('use_real_price', True) 
+    # 设定成交量比例
+    set_option('order_volume_ratio', 1)
+    # 股票类交易手续费是：买入时佣金万分之三，卖出时佣金万分之三加千分之一印花税, 每笔交易佣金最低扣5块钱
+    set_order_cost(OrderCost(open_tax=0, close_tax=0.001, \
+                             open_commission=0.00012, close_commission=0.00012,\
+                             close_today_commission=0, min_commission=1), type='stock')
+    # 运行函数
+    # run_daily(trade,'9:35')
+    run_daily(trade,'every_bar')
+## 交易程序
+def trade(context):
+    security = g.security
+    stock_name_cash='511880.XSHG'
+    stock_name_zs='399300.XSHE'
+    # 设定均线窗口长度
+    cash_flag = 1             # 设置买货币基金标志 1：货币基金         0：现金
+    dt_flag = 1               # 设置定投标志：     1：进行定投         0：不进行定投
+    wg_flag = 0               # 设置网格标志：     1：进行网格交易     0：不进行网格交易
+    bc_flag = 1               # 设置补仓标志：     1：进行金字塔补仓   0：不进行补仓
+    n1 = 10                   # 短期均线
+    h1 = 250                  # 长期均线1
+    h2 = 250                  # 长期均线2
+
+#  开始处理每一个标的买入，卖出操作
+    for stock_name in security[:]:
+       # 获取该股票的PE,PB
+        df   = get_fundamentals(query(valuation.code,valuation.pe_ratio,valuation.pb_ratio,indicator.roe).filter(valuation.code==stock_name))
+        m_pe = df['pe_ratio'].values
+        m_pb = df['pb_ratio'].values
+        m_roe = df['roe'].values
+
+        close_data = attribute_history(stock_name, h2+2, '1d', ['close'],df=False)
+        # 取得过去 n1天的平均价格
+        ma_n1 = close_data['close'][-n1:].mean()
+        ma_n2 = close_data['close'][-n1 -1: -1].mean()
+        ma_n3 = close_data['close'][-n1 -2: -2].mean()
+
+        # 取得均线拐头标志 -1:上拐 1:下拐 0:不拐点
+        if   ma_n1 > ma_n2 and ma_n3 >= ma_n2 :
+            ma_flag = -1
+        elif ma_n1 < ma_n2 and ma_n3 <= ma_n2 :
+            ma_flag =  1
+        else  :
+            ma_flag =  0
+
+        # 取得过去 h1,h2 天的平均价格
+        ma_h1 = close_data['close'][-h1:].mean()
+        ma_h2 = close_data['close'][-h2:].mean()
+        curr_buy  = min(ma_h1,ma_h2)
+        curr_sell = max(ma_h1,ma_h2)
+        # 取得昨日收盘价格
+        curr_close = close_data['close'][-1]
+        # 取得可卖出的仓位(持仓量)
+        curr_amount = context.portfolio.positions[stock_name].closeable_amount
+        # 取得标的价值(持仓市值)
+        curr_value = context.portfolio.positions[stock_name].value
+        # 取得标的上次成交价格
+        last_price = context.portfolio.positions[stock_name].price
+        # 取得买入标的的当前持仓成本
+        curr_avg_cost = context.portfolio.positions[stock_name].acc_avg_cost
+        # 取得帐户货币基金
+        if cash_flag == 1  :
+            curr_available_cash1 = context.portfolio.positions[stock_name_cash].value
+        # 取得帐户可用资金
+        curr_available_cash0 = context.portfolio.available_cash
+        # 取得帐户总计可用资金余额：现金+货币基金
+        curr_available_cash = curr_available_cash0 + curr_available_cash1
+        # 取得帐户总资产
+        curr_total_value = context.portfolio.total_value
+        # 计算帐户仓位比例
+        curr_cw = 1 - curr_available_cash / curr_total_value
+        # 输出帐户仓位图表
+        record(cw1 = curr_cw)
+        #设置底仓金额和网格金额
+        m_max    = 500000
+        m0       = 100000
+        m1       = 50000      #每次金字塔补仓基准金额
+        m2       = 50000      #每次定投交易金额
+        m3       = 50000      #每次网格交易金额
+        m_max    = curr_total_value / 8
+        m0       = m_max * 0.2       #底仓金额
+        m1       = m_max * 0.11      #每次金字塔补仓基准金额
+        m2       = m_max * 0.15      #每次定投交易金额
+        m3       = m_max * 0.13      #每次网格交易金额
+        curr_price = curr_close
+        # 空仓时：当前价格低于抄底买入线,短期均线低位拐头向上
+        if curr_value == 0 and curr_price < curr_buy and m_pe < 7 and m_pb < 1 and ma_flag == -1 : 
+            if cash_flag == 1  :
+               order_value(stock_name_cash,-1000 - m0)   #  卖出m0货币基金，用于建仓
+            order_value(stock_name,m0)                   #  帐户空仓时,买入的底仓，作为基准仓位
+            g.last_price_bc[stock_name] = curr_price     #  成交价设定为上次补仓初始价
+            g.last_price_wg[stock_name] = curr_price     #  成交价设定为上次网格交易价格
+            g.last_price[stock_name]    = curr_price     #  成交价设定为上次交易价
+            g.start_price[stock_name]   = curr_price     #  初始买入价格
+            g.total_count[stock_name]   = 1              #  买入次数为1
+            g.days[stock_name] = 1                       #  设定持仓天数，用于定投判断
+            log.info("name:  %s" % (stock_name))
+            log.info("m_pe:  %s" % (m_pe))
+            log.info("m_pb:  %s" % (m_pb))
+
+        if  curr_value > 0    :  #  有持仓市值
+            log.info("curr_price:  %s" % (curr_price))
+            log.info("curr_avg_cost:  %s" % (curr_avg_cost))
+            g.days[stock_name] = g.days[stock_name] + 1                    #  持仓天数加1
+# 金字塔补仓： 进行金字塔式补仓，降低仓位成本。条件是：买入线以下，当前价比成本价低10%，均线拐头，仓位没到最大仓位。
+            if bc_flag == 1 and curr_price < curr_buy and curr_price <  curr_avg_cost * 0.95 and m_pe < 7 and m_pb < 1 and ma_flag == -1 and curr_value < m_max :
+                g.total_count[stock_name]   = g.total_count[stock_name]  + 1                             #  买入次数加1
+                g.last_price_bc[stock_name] = curr_price                                                 #  成交价设定为上次补仓价
+                g.last_price[stock_name]    = curr_price                                                 #  成交价设定为上次交易价
+                if cash_flag == 1  :
+                    order_value(stock_name_cash,- 1000 - (m1 * g.total_count[stock_name]))               #  卖出货币基金，用于建仓
+                order_value(stock_name,m1 * g.total_count[stock_name])                                   #  买入一次： m1 * g.total_count[stock_name]
+                log.info("name:  %s" % (stock_name))
+                log.info("m_pe:  %s" % (m_pe))
+                log.info("m_pb:  %s" % (m_pb))
+# 定投补仓： 如亏损状态，进行定期定额定投一次，降低仓位成本。条件是：买入线以下，当前价比成本价低，仓位没到最大仓位，每20个交易日定投一次。
+            elif dt_flag == 1 and curr_price < curr_buy and curr_price < curr_avg_cost * 0.99 and m_pe < 7 and m_pb < 1 and g.days[stock_name] % 10 == 0 and curr_value < m_max :    # 每10个交易日定投一次
+                g.last_price[stock_name]    = curr_price                                                 #  成交价设定为上次交易价
+                if cash_flag == 1  :
+                   order_value(stock_name_cash,- 1000 - m2)                                              #  卖出货币基金，用于建仓
+                order_value(stock_name,m2)                                                               #  定投一次m2
+                log.info("name:  %s" % (stock_name))
+                log.info("m_pe:  %s" % (m_pe))
+                log.info("m_pb:  %s" % (m_pb))
+# 网格买入1： 在低成本区域,如未满仓,采用网格交易，降低仓位成本。条件是：买入线以下，当前价比上次交易价低5%，仓位没到最大仓位1.2倍。
+            elif wg_flag == 1 and curr_value < m_max * 1.0 and curr_price < curr_sell and m_pe < 7 and m_pb < 1  and curr_price < g.last_price_wg[stock_name] * 0.95 :
+                g.last_price_wg[stock_name] = curr_price                                                 #  成交价设定为上次网格交易价
+                g.last_price[stock_name]    = curr_price                                                 #  成交价设定为上次交易价
+                if cash_flag == 1  :
+                   order_value(stock_name_cash,- 1000 - m3)                                              #  卖出货币基金，用于建仓
+                order_value(stock_name,m3)                                                               #  网格买入一次m3
+                log.info("name:  %s" % (stock_name))
+                log.info("m_pe:  %s" % (m_pe))
+                log.info("m_pb:  %s" % (m_pb))
+# 网格卖出1： 在低成本区域,如仓位较重,采用网格交易，降低仓位成本。条件是：买入线以下，当前价比上次交易价高8%，仓位大于50%仓位。
+            elif wg_flag == 1 and curr_value > m_max * 0.1 and curr_price < curr_sell and curr_price > g.last_price_wg[stock_name] * 1.06 : 
+                g.last_price_wg[stock_name] = curr_price                                                 #  成交价设定为上次网格交易价价
+                g.last_price[stock_name]    = curr_price                                                 #  成交价设定为上次交易价
+                order_value(stock_name,-m3)                                                              #  网格卖出一次m3
+# 止盈卖出：在不同的总仓位控制下，按不同的止盈标准进行止盈s_flag
+#            elif curr_cw >= 0.8  and curr_price > curr_sell and (curr_price > curr_avg_cost * 1.5 or (curr_price > curr_avg_cost * 1.2 and ma_flag == 1)) : 
+#                g.total_count[stock_name] = 0     #  买入次数清0
+#                g.days[stock_name]        = 0     #  初始化持仓天数0
+#                order_target(stock_name,0)        #  股票翻倍时卖出所有股票
+#            elif curr_price > curr_sell and (curr_price > curr_avg_cost * 5  or m_pe < 12 or m_pb > 1.5 or (curr_price > curr_avg_cost * 3 and  ma_flag == 1)) : 
+            elif curr_price > curr_sell and (curr_price > curr_avg_cost * 5   or m_pe > 10 or m_pb > 1.5  or (curr_price > curr_avg_cost * 3 and  ma_flag == 1)) : 
+                g.total_count[stock_name] = 0     #  买入次数清0
+                g.days[stock_name]        = 0     #  初始化持仓天数0
+                order_target(stock_name,0)        #  股票翻倍时卖出所有股票
+                log.info("sell name:  %s" % (stock_name))
+                log.info("m_pe:  %s" % (m_pe))
+                log.info("m_pb:  %s" % (m_pb))
+# 有多余的资金，转成货币基金
+        if cash_flag == 1  :
+            curr_available_cash = context.portfolio.available_cash
+            if curr_available_cash > 11000  :
+               order_value(stock_name_cash,curr_available_cash)                     #  剩余资金转成货币基金

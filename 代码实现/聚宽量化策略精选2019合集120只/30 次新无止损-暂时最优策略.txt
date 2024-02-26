@@ -1,0 +1,96 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/20855
+# 标题：次新无止损-暂时最优策略
+# 作者：智子投资
+
+# 本策略请选择 python 2 下回测,选择 分钟 回测。
+
+def initialize(context):
+    set_commission(PerTrade(buy_cost=0.0003, sell_cost=0.0013, min_cost=5))
+    set_option('use_real_price', True)
+    g.buy_stock_count = 2
+    
+def handle_data(context, data):
+    hour = context.current_dt.hour
+    minute = context.current_dt.minute
+    if hour == 10 and minute == 01:
+        buy_stocks = select_stocks(context,data)
+        adjust_position(context, buy_stocks)
+        
+def filter_paused_and_st_stock(stock_list):
+    current_data = get_current_data()
+    return [stock for stock in stock_list if not current_data[stock].paused 
+    and not current_data[stock].is_st and 'ST' not in current_data[stock].
+    name and '*' not in current_data[stock].name and '退' not in current_data[stock].name]
+
+def filter_gem_stock(context, stock_list):
+    return [stock for stock in stock_list  if stock[0:3] != '300']    
+
+def filter_old_stock(context, stock_list):
+    tmpList = []
+    for stock in stock_list :
+        days_public=(context.current_dt.date() - get_security_info(stock).start_date).days
+        # 上市未超过1年
+        if days_public < 365:
+            tmpList.append(stock)
+    return tmpList
+
+'''
+def filter_limit_stock(context, stock_list):
+    tmpList = []
+    last_prices = history(1, '1m', 'close', security_list=stock_list)
+    curr_data = get_current_data()
+    for stock in stock_list:
+        # 未涨停，也未跌停
+        if curr_data[stock].low_limit < last_prices[stock][-1] < curr_data[stock].high_limit:
+            tmpList.append(stock)
+    return tmpList
+'''
+def filter_limit_stock(context, data, stock_list):
+    tmpList = []
+    curr_data = get_current_data()
+    for stock in stock_list:
+        # 未涨停，也未跌停
+        if curr_data[stock].low_limit < data[stock].close < curr_data[stock].high_limit:
+            tmpList.append(stock)
+    return tmpList
+
+def select_stocks(context,data):
+    # 选取流通市值小于100亿的100只股票
+    q = query(valuation.code, valuation.circulating_market_cap).order_by(
+            valuation.circulating_market_cap.asc()).filter(
+            valuation.circulating_market_cap <= 100).limit(100)
+    df = get_fundamentals(q)
+    stock_list = list(df['code'])
+    
+    # 过滤掉停牌的和ST的
+    stock_list = filter_paused_and_st_stock(stock_list)
+    # 过滤掉创业板
+    stock_list = filter_gem_stock(context, stock_list)
+    # 过滤掉上市超过1年的
+    stock_list = filter_old_stock(context, stock_list)
+    # 过滤掉现在涨停或者跌停的
+    # stock_list = filter_limit_stock(context, stock_list)
+    stock_list = filter_limit_stock(context, data, stock_list)
+    # 选取前N只股票放入“目标池”
+    stock_list = stock_list[:g.buy_stock_count]  
+    return stock_list
+    
+def adjust_position(context, buy_stocks):
+    # 现持仓的股票，如果不在“目标池”中，且未涨停，就卖出
+    if len(context.portfolio.positions)>0:
+        last_prices = history(1, '1m', 'close', security_list=context.portfolio.positions.keys())
+        for stock in context.portfolio.positions.keys():
+            if stock not in buy_stocks:
+                curr_data = get_current_data()
+                if last_prices[stock][-1] < curr_data[stock].high_limit:
+                    order_target_value(stock, 0)
+    
+    # 依次买入“目标池”中的股票            
+    for stock in buy_stocks:
+        position_count = len(context.portfolio.positions)
+        if g.buy_stock_count > position_count:
+            value = context.portfolio.cash / (g.buy_stock_count - position_count)
+            if context.portfolio.positions[stock].total_amount == 0:
+                order_target_value(stock, value)

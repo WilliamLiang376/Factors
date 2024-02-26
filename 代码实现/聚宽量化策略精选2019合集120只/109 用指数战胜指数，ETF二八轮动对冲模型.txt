@@ -1,0 +1,95 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+
+# 导入函数库
+import numpy as np
+import pandas as pd
+import datetime
+from jqdata import *
+
+# 初始化函数，设定基准等等
+def initialize(context):
+    # 设置模型参数
+    set_parms()
+    # 设定沪深300作为基准
+    set_benchmark('000300.XSHG')
+    # 开启动态复权模式(真实价格)
+    set_option('use_real_price', True)
+    # 过滤掉order系列API产生的比error级别低的log
+    log.set_level('order', 'error')
+    # 股票类每笔交易时的手续费是：买入时佣金万分之三，卖出时佣金万分之三加千分之一印花税, 每笔交易佣金最低扣5块钱
+    set_order_cost(OrderCost(close_tax=0.001, open_commission=0.0003, close_commission=0.0003, min_commission=5), type='stock')
+    # 运行
+    run_daily(market_trade, time='14:53', reference_security='000300.XSHG')
+    log.info('-----------------程序开始-------------------')
+    
+# 设置参数
+def set_parms():
+    g.cycle = 20  # 设置计算动量的周期
+    g.index_list = ['000300.XSHG', '000905.XSHG']  # 指数列表
+    g.etf_list = ['510300.XSHG', '510500.XSHG']  # ETF列表
+    g.bond = '150051.XSHE'  # 负相关品种
+    # g.bond = '511010.XSHG'  # 国债ETF
+    g.ratio = 0.00  # 动量正值最小幅度
+    
+# 开盘前运行
+def before_trading_start(context):
+    # 将滑点设置为0
+    set_slippage(FixedSlippage(0)) 
+    # 根据不同的时间段设置手续费
+    dt=context.current_dt
+    if dt>datetime.datetime(2013,1, 1):
+        set_commission(PerTrade(buy_cost=0.0003, sell_cost=0.0013, min_cost=5)) 
+    elif dt>datetime.datetime(2011,1, 1):
+        set_commission(PerTrade(buy_cost=0.001, sell_cost=0.002, min_cost=5))
+    elif dt>datetime.datetime(2009,1, 1):
+        set_commission(PerTrade(buy_cost=0.002, sell_cost=0.003, min_cost=5))
+    else:
+        set_commission(PerTrade(buy_cost=0.003, sell_cost=0.004, min_cost=5))
+
+## 收盘之前运行
+def market_trade(context):
+    signal = get_signal(context)
+    log.info('信号', signal)
+    if signal == 'clear' and len(context.portfolio.positions) > 0:
+        for etf in context.portfolio.positions.keys():
+            order_target_value(etf, 0) 
+            log.info('卖出', get_security_info(etf).display_name)
+    elif (signal in g.etf_list):
+        if g.bond in context.portfolio.positions.keys():
+            order_target_value(g.bond, 0) 
+            log.info('卖出', get_security_info(g.bond).display_name)
+        order_value(signal, context.portfolio.cash)
+        log.info('买入', get_security_info(signal).display_name)
+    elif signal == g.bond:
+        for etf in context.portfolio.positions.keys():
+            order_target_value(etf, 0) 
+            log.info('卖出', get_security_info(etf).display_name)
+        order_value(g.bond, context.portfolio.cash)
+        log.info('买入', get_security_info(g.bond).display_name)
+    
+    
+# 获取交易信号
+def get_signal(context):
+    hold = context.portfolio.positions.keys()
+    # 计算全部标的的动量值
+    power_df = pd.DataFrame({e: {'power': get_power(i, g.cycle)}\
+        for i, e in zip(g.index_list, g.etf_list)}).T
+    # 判断是否需要买入国债
+    if g.bond not in hold and False not in [True if power_df.loc[i, 'power'] <= 0 else False for i in power_df.index]:
+        return g.bond
+    # 判断持仓标的是否出现负动量
+    elif [i for i in power_df.index if i in hold and power_df.loc[i, 'power'] <= 0] and g.bond not in hold:
+        return 'clear'
+    # 判断哪个标的的动量值大于0，选择最大的
+    elif power_df.sort_index(by=['power'])['power'][-1] > g.ratio and len(set(g.etf_list) & set(hold)) <= 0:
+        return power_df.sort_index(by=['power']).index[-1]
+
+
+# 计算动量值
+def get_power(stock, interval=20):
+    h = attribute_history(stock, interval, unit='1d', fields=('close'), skip_paused=True)
+    return (h['close'].values[-1] - h['close'].values[0]) / h['close'].values[0]
+
+# 收盘后运行
+def after_trading_end(context):
+    log.info('*'*50)

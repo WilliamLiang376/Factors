@@ -1,0 +1,404 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/23312
+# 标题：优质股高抛低吸策略
+# 作者：千尘
+
+from jqdata import *
+import pandas as pd
+from jqfactor import *
+import numpy as np
+import datetime
+
+# 初始化函数，设定基准等等
+def initialize(context):
+    set_option("avoid_future_data", True)
+    # 设定沪深300作为基准
+    set_benchmark('000300.XSHG')
+    # 开启动态复权模式(真实价格)
+    set_option('use_real_price', True)
+    # 输出内容到日志 log.info()
+    log.info('初始函数开始运行且全局只运行一次')
+    # 过滤掉order系列API产生的比error级别低的log
+    # log.set_level('order', 'error')
+
+    ### 股票相关设定 ###
+    # 股票类每笔交易时的手续费是：买入时佣金万分之三，卖出时佣金万分之三加千分之一印花税, 每笔交易佣金最低扣5块钱
+    set_order_cost(OrderCost(close_tax=0.001, open_commission=0.0003, close_commission=0.0003, min_commission=5),
+                   type='stock')
+
+    ## 运行函数（reference_security为运行时间的参考标的；传入的标的只做种类区分，因此传入'000300.XSHG'或'510300.XSHG'是一样的）
+    # 开盘前运行
+    run_daily(before_market_open, time='before_open', reference_security='000300.XSHG')
+    # 开盘时运行
+    # run_daily(market_open, time='open', reference_security='000300.XSHG')
+    # 收盘后运行
+    run_daily(buy_or_sell, time='every_bar', reference_security='000300.XSHG')
+
+    g.stock_list = []
+
+
+def get_income_profit():
+    q = query(
+        indicator
+    ).filter(
+    )
+    df = get_fundamentals(q)
+    inc_total_revenue_year_on_year = {}
+    inc_operation_profit_year_on_year = {}
+    for index, row in df.iterrows():
+        code = row['code']
+        inc_total_revenue_year_on_year[code] = row['inc_total_revenue_year_on_year']
+        inc_operation_profit_year_on_year[code] = row['inc_operation_profit_year_on_year']
+    return inc_total_revenue_year_on_year, inc_operation_profit_year_on_year
+
+
+def set_feasible_stocks(context, stock_list):
+    set_universe(stock_list)
+    current_data = get_current_data()
+    stock_list_after_filter = []
+    inc_total_revenue_year_on_year, inc_operation_profit_year_on_year = get_income_profit()
+    st_dict = get_extras('is_st', stock_list, start_date=context.previous_date, end_date=context.previous_date,
+                         df=True)
+
+    # filter  paused / st / hight limit / low limit / bad profit
+    for stock in stock_list:
+        if st_dict[stock][0]:
+            #log.info('stock %s st', stock)
+            continue
+
+        if inc_total_revenue_year_on_year.get(stock, -1) < 0:
+            # log.info('inc_total_revenue_year_on_year not good')
+            continue
+        if inc_operation_profit_year_on_year.get(stock, -1) < 0:
+            # log.info('inc_operation_profit_year_on_year not good')
+            continue
+
+        stock_list_after_filter.append(stock)
+    # filter bad profit
+
+    return stock_list_after_filter
+
+
+def get_index_percent(context):
+    end_date = context.previous_date
+    start_date = end_date - datetime.timedelta(days=366)
+    # 获取最近60天的指数数据
+    sh_index = {}
+    sz_index = {}
+    price_list = get_price('000001.XSHG', start_date=start_date, end_date=end_date)
+    last_value = 0
+    for index, row in price_list.iterrows():
+        if last_value == 0:
+            last_value = row['close']
+            continue
+        sh_index[index] = round(((row['close'] - last_value) / last_value) * 100, 3)
+        last_value = row['close']
+
+    price_list = get_price('399001.XSHE', start_date=start_date, end_date=end_date)
+    last_value = 0
+    for index, row in price_list.iterrows():
+        if last_value == 0:
+            last_value = row['close']
+            continue
+        sz_index[index] = round(((row['close'] - last_value) / last_value) * 100, 3)
+        last_value = row['close']
+    return sh_index, sz_index
+
+
+def get_stock_percent(context, stock_list):
+    stock_percent = {}
+    stock_last_prict = {}
+    end_date = context.previous_date
+    start_date = end_date - datetime.timedelta(days=366)
+    price_list = get_price(stock_list, start_date=start_date, end_date=end_date, frequency='daily')
+    close_price_list = price_list['close']
+    for index, row in close_price_list.iterrows():
+        for code in close_price_list.columns:
+            if not (code in stock_percent.keys()):
+                stock_percent[code] = {}
+            last_price = stock_last_prict.get(code, 0)
+            stock_last_prict[code] = row[code]
+            if last_price == 0:
+                continue
+            stock_percent[code][index] = round(((row[code] - last_price) / last_price) * 100, 3)
+    #log.info(stock_percent[stock_list[0]])
+    return stock_percent
+
+
+def calculate_strong_factor(context, stock_list):
+    stock_factor_list = {}
+    #end_date = context.previous_date
+    #start_date = end_date - datetime.timedelta(days=61)
+
+    previous_date_timestamp = pd.Timestamp(context.previous_date)
+    # 获取最近60天的指数数据和股票行情数据
+    log.info('start get data')
+    sh_index, sz_index = get_index_percent(context)
+    log.info('finish get index')
+    stock_percent_dict = get_stock_percent(context, stock_list)
+    log.info('finish get stock')
+    for stock in stock_list:
+        current_stock_data = stock_percent_dict.get(stock, None)
+        if not current_stock_data:
+            #log.info('stock %s has not data', stock)
+            continue
+        # 过滤涨跌盘
+        if (current_stock_data[previous_date_timestamp] > 9) or (current_stock_data[previous_date_timestamp] < -9):
+            #log.info('The previous date change too much %s', stock)
+            continue
+        #过滤过去10天涨跌幅度过大的股票
+        previe_ten_percent = 0
+        for i in range(10):
+            current_dt = context.previous_date - datetime.timedelta(days=i)
+            current_timestamp = pd.Timestamp(current_dt)
+            current_percent = current_stock_data.get(current_timestamp, 0)
+            if current_percent < 0:
+                current_percent = -current_percent
+            if ( stock == '603189.XSHG'):
+                log.info(current_stock_data.get(current_timestamp, 0))
+            previe_ten_percent += current_percent
+        if (stock == '603189.XSHG'):
+            log.info('previe_ten_percent %s' % previe_ten_percent)
+        if (previe_ten_percent >= 30):
+            log.info('The previous date change too much %s', stock)
+            continue
+
+        tmp_index = sh_index
+        if stock.endswith('.XSHE'):
+            tmp_index = sz_index
+        count_good = 0
+        count_bad = 0
+        # 计算factor
+        for key, value in current_stock_data.items():
+            if value > tmp_index.get(key, 0):
+                count_good += 1
+            else:
+                count_bad += 1
+        stock_factor_list[stock] = count_good / (count_bad + count_good)
+    #log.info(stock_factor_list)
+    stock_after_sorted = sorted(stock_factor_list.items(), key=lambda d: d[1], reverse=True)
+    stock_after_sorted_100 = stock_after_sorted[0:100]
+    #log.info(stock_after_sorted_100)
+    #return stock_after_sorted[0:100]
+    stock_factor_list_100 = {}
+    ts_21 = pd.Timestamp(context.previous_date - datetime.timedelta(days=21))
+    #按最近20天再重新排序
+    for stock, value in stock_after_sorted_100:
+        current_stock_data = stock_percent_dict.get(stock, None)
+        tmp_index = sh_index
+        if stock.endswith('.XSHE'):
+            tmp_index = sz_index
+        count_good = 0
+        count_bad = 0
+        # 计算factor
+        for key, value in current_stock_data.items():
+            if key < ts_21:
+                continue
+            if value > tmp_index.get(key, 0):
+                count_good += 1
+            else:
+                count_bad += 1
+        stock_factor_list_100[stock] = count_good / (count_bad + count_good)
+    stock_100_after_sorted = sorted(stock_factor_list_100.items(), key=lambda d: d[1], reverse=True)
+    #log.info(stock_100_after_sorted)
+    return [stock for stock, value in stock_100_after_sorted[0:10]]
+
+def get_avg_price(context, stock):
+    end_date = context.previous_date
+    start_date = end_date - datetime.timedelta(days=5)
+    stock_price_list = get_price(stock, start_date=start_date, end_date=end_date, frequency='daily')
+    count = 0
+    max_price = 0
+    min_price = 1000000
+    total_price = 0
+    for index, row in stock_price_list.iterrows():
+        current_price = row['close']
+        total_price += current_price
+        if current_price>max_price:
+            max_price = current_price
+        if current_price < min_price:
+            min_price = current_price
+        count += 1
+    avg_price = total_price / count
+    up_percent = ((max_price - avg_price) / avg_price) * 100
+    down_percent = ((avg_price - min_price) / avg_price) * 100
+    if (up_percent > 10) or ( up_percent < 2 ):
+        log.info('up_percent of stock %s is %s' % (stock, up_percent))
+        return (False, avg_price)
+    if (down_percent>10) or (down_percent<2):
+        log.info('down_percent of stock %s is %s' % (stock, down_percent))
+        return (False, avg_price)
+    return (True, avg_price)
+
+
+def before_market_open(context):
+    log.info('before_market_open：' + str(context.current_dt.time()))
+    # get all stock
+    stock_list = list(get_all_securities(['stock']).index)
+    log.info('stocks length: %s', len(stock_list))
+
+    # 过滤上市时间小于120天的股票
+    for stock in stock_list:
+        days_public = (context.current_dt.date() - get_security_info(stock).start_date).days
+        if days_public < 120:
+            stock_list.remove(stock)
+
+    # filter  paused / st / hight limit / low limit / bad profit
+    stock_list = set_feasible_stocks(context, stock_list)
+    log.info('stocks length after filter: %s', len(stock_list))
+
+    g.stock_list = stock_list
+    g.previous_date = context.previous_date
+    values = calc_factors(g.stock_list,
+                          [FinanacialFactor()],
+                          context.previous_date,
+                          context.previous_date)
+
+    factor_dict = values['financial_factor'].ix[0].to_dict()
+    factor_after_sorted = sorted(factor_dict.items(), key=lambda d: d[1], reverse=False)
+    #print(factor_after_sorted)
+    g.stock_list_select = []
+    for stock, value in factor_after_sorted[0:500]:
+        g.stock_list_select.append(stock)
+    #print(g.stock_list_select)
+
+    # get top 100
+    g.stock_list = calculate_strong_factor(context, g.stock_list_select)
+    g.sell_list = {}
+    g.buy_list = {}
+    g.position_list = []
+    g.stop_loss ={}
+    #计算卖出点
+    for position_stock, position_info in context.portfolio.positions.items():
+        g.position_list.append(position_stock)
+        bug_flag, avg_price = get_avg_price(context, position_stock)
+        g.sell_list[position_stock] = avg_price * 1.03
+        avg_cost = position_info.avg_cost
+        if avg_price < (avg_cost*0.95):
+            g.stop_loss[position_stock] = True
+        else:
+            g.stop_loss[position_stock] = False
+    #计算买入点
+    for stock in g.stock_list:
+        bug_flag, avg_price = get_avg_price(context, stock)
+        if not bug_flag:
+            continue
+        g.buy_list[stock] = avg_price * 0.97
+    set_universe(g.stock_list)
+
+# buy or sell stocks
+def buy_or_sell(context):
+    log.info('start buy or sell')
+    buy_percent = 3
+    #current_data = get_current_data()
+    cash = context.portfolio.available_cash
+    start_cash = context.portfolio.starting_cash
+
+    for position_stock, position_info in context.portfolio.positions.items():
+        #log.info('check sell %s' % position_stock)
+        current_price = position_info.price
+        total_amount = position_info.total_amount
+        avg_cost = position_info.avg_cost
+        init_time = position_info.init_time.date()
+        avg_check_win_price = avg_cost * 1.07
+        if not g.sell_list.get(position_stock, None):
+            continue
+        position_time = (context.previous_date-init_time).days
+        if position_time < 5:
+            check_win_price = g.sell_list[position_stock] if g.sell_list[position_stock] > avg_check_win_price else avg_check_win_price
+        else:
+            check_win_price = g.sell_list[position_stock] if g.sell_list[position_stock] < avg_check_win_price else avg_check_win_price
+
+        if ((((g.sell_list[position_stock] - current_price) / g.sell_list[position_stock]) * 100) > 10) and g.stop_loss[position_stock]:
+            order(position_stock, -total_amount)
+            log.info('sell stock %s, price: %s, amount: %s' % (position_stock, current_price, total_amount))
+            continue
+        if current_price > check_win_price:
+            order(position_stock, -total_amount)
+            log.info('sell stock %s, price: %s, amount: %s' % (position_stock, current_price, total_amount))
+
+    if cash < start_cash/buy_percent:
+        return
+
+    for stock in g.stock_list:
+        #log.info('check buy %s', stock)
+        if stock in g.position_list:
+            continue
+        if g.buy_list.get(stock, 0) <= 0:
+            continue
+        current_price = get_current_tick(stock)
+        if not current_price:
+            continue
+        if current_price['current'] < g.buy_list[stock]:
+            buy_volumn = int(((start_cash/buy_percent) / current_price['current']) / 100)
+            order(stock, buy_volumn*100)
+            log.info('buy stock %s, price: %s, volumn: %s' % (stock, current_price['current'], buy_volumn))
+            g.position_list.append(stock)
+
+
+class FinanacialFactor(Factor):
+    # 设置因子名称
+    name = 'financial_factor'
+    # 设置获取数据的时间窗口长度
+    max_window = 1
+    # 设置依赖的数据，即前四季度的营业收入
+    dependencies = ['eps_ttm',  #每股收益
+                    'net_asset_per_share', #每股净资产
+                    #'operating_revenue_growth_rate', #营业收入增长率
+                    #'net_profit_growth_rate', #静利润增长率
+                    'inc_total_revenue_year_on_year',
+                    'inc_net_profit_year_on_year',
+                    'inc_total_revenue_year_on_year_1',
+                    'inc_net_profit_year_on_year_1',
+                    'inc_total_revenue_year_on_year_2',
+                    'inc_net_profit_year_on_year_2',
+                    'inc_total_revenue_year_on_year_3',
+                    'inc_net_profit_year_on_year_3',
+                    'inc_total_revenue_year_on_year_4',
+                    'inc_net_profit_year_on_year_4',
+                    ]
+
+    def get_sorted(self, input_dict):
+        dict_after_sorted = {}
+        for index, row in input_dict.iterrows():
+            for key,value in row.items():
+                if np.isnan(value):
+                    row[key] = 0
+            row_after_sort = sorted(row.items(), key=lambda d: d[1], reverse=True)
+            print(row_after_sort)
+            count = 1
+            for key,value in row_after_sort:
+                dict_after_sorted[key] = count
+                count += 1
+            break
+        print(dict_after_sorted)
+        return dict_after_sorted
+
+    def get_cur_price(self):
+        all_price = get_price(g.stock_list, start_date=g.previous_date, end_date=g.previous_date)
+        return all_price['close']
+
+    def cal_revenue(self, data, key):
+        result = (abs(data[key]) / data[key]) * pow(abs(data[key]), 0.5)
+        for i in range(1, 5):
+            tmp_key = key + '_' + str(i)
+            result += (abs(data[tmp_key]) / data[tmp_key]) * pow(abs(data[tmp_key]), 0.5)
+        print(result)
+        return result
+
+    def calc(self, data):
+        #close_pricce = self.get_cur_price()
+        inc_total_revenue_year_on_year = self.cal_revenue(data, 'inc_total_revenue_year_on_year')
+        inc_net_profit_year_on_year = self.cal_revenue(data, 'inc_net_profit_year_on_year')
+        eps_ttm = data['eps_ttm'] #/ close_pricce
+        net_asset_per_share = data['net_asset_per_share'] #/ close_pricce
+        eps_ttm_sorted = self.get_sorted(eps_ttm)
+        net_asset_per_share_sorted = self.get_sorted(net_asset_per_share)
+        inc_total_revenue_year_on_year_sorted = self.get_sorted(inc_total_revenue_year_on_year)
+        inc_net_profit_year_on_year_sorted = self.get_sorted(inc_net_profit_year_on_year)
+        final_result ={}
+        for stock in g.stock_list:
+            final_result[stock] = (eps_ttm_sorted[stock] + net_asset_per_share_sorted[stock]
+                                   + inc_total_revenue_year_on_year_sorted[stock] + inc_net_profit_year_on_year_sorted[stock] ) / 4
+        return pd.Series(final_result)

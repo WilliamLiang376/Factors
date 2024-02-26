@@ -1,0 +1,209 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/17121
+# 标题：回馈社区，分享市盈率股息率选股+均线止盈交易策略
+# 作者：一梦春秋
+
+# 本策略请选择 python 2 下回测
+
+from jqdata import *
+from kuanke.wizard import *
+
+def initialize(context):
+    # 定义一个全局变量, 保存要操作的股票
+    # (股票:黄河旋风，曲美家具，浙江美大，再生科技)
+    
+    g.mavalue = 10;
+    g.buy_value=10000
+    g.add_percent = -0.10
+    g.sell_percent = 0.16
+    # 初始化此策略
+    set_option('use_real_price', True)
+    choosePool(context);
+    run_monthly(choosePool, 1, time='09:00')
+    set_option("avoid_future_data", True)
+
+
+# 每个单位时间(如果按天回测,则每天调用一次,如果按分钟,则每分钟调用一次)调用一次
+def handle_data(context, data):
+    
+    # for i in 0,top:
+    for security in g.security:
+        judgeAndBuy2(context,data,security,0.95)
+        
+    for security,v in context.portfolio.positions.items():
+        judgeAndBuy2(context,data,security,0.95);
+        
+    #卖出
+    for security,v in context.portfolio.positions.items():
+        judgeAndSell2(context,data,security);
+    # 画出上一时间点价格
+    record(cash=context.portfolio.available_cash)
+    
+
+def judgeAndBuy2(context,data,security,percent=0.95):
+    current_data = get_current_data()
+    is_st = current_data[security].is_st
+    if is_st:
+        return;
+
+    # 取得过去五天的平均价格
+    average_price = data[security].mavg(g.mavalue, 'close')
+    ma10 = data[security].mavg(10, 'close')
+    # 取得上一时间点价格
+    current_price = data[security].close
+    #每次买卖数目,当天最多买入数目
+    buy_amount = 100
+    
+    closeable_amount = context.portfolio.positions[security].closeable_amount
+    avg_cost = context.portfolio.positions[security].avg_cost
+    
+    # log.info("沪深 %s baseStockMa5 %s" % (baseStockPrice,baseStockMa5));
+    if context.portfolio.positions[security].today_amount >= buy_amount:
+        return;
+    if closeable_amount==0:
+        if current_price < percent*average_price :
+            buyValue = g.buy_value
+            # if context.portfolio.cash < buyValue:
+            #     judgeAndSellMaxTime(context,data,buyValue-context.portfolio.cash)
+            order_value(security, buyValue)
+    else:
+        if (current_price - avg_cost) / avg_cost < g.add_percent:
+            buyValue = g.buy_value
+            # buyValue = 10000
+            # if context.portfolio.cash < buyValue:
+            #     judgeAndSellMaxTime(context,data,buyValue-context.portfolio.cash)
+            # order(security, closeable_amount)
+            order_value(security, buyValue)
+            
+
+    
+
+            
+def judgeAndSell2(context,data,security):
+    current_data = get_current_data()
+    if context.portfolio.positions[security].today_amount > 0:
+        return;
+    is_st = current_data[security].is_st
+    if is_st:
+        order_target(security, 0)
+        return;
+        
+    # 取得过去五天的平均价格
+    average_price = data[security].mavg(10, 'close')
+    # 取得上一时间点价格
+    current_price = data[security].close
+    
+    closeable_amount = context.portfolio.positions[security].closeable_amount
+    avg_cost = context.portfolio.positions[security].avg_cost
+    if closeable_amount <= 0:
+        return;
+        
+    days = (context.current_dt - context.portfolio.positions[security].init_time).days
+    value = context.portfolio.positions[security].value
+    
+        
+    if (current_price - avg_cost) / avg_cost > g.sell_percent:
+        # 卖出股票
+        # order(security, -1 * closeable_amount)
+        order_target(security, 0)
+        log.info("卖出%s 持仓天数%s" % (security,days));
+        return;
+        
+
+    
+        
+def choosePool(context):
+    securitys = get_index_stocks('000001.XSHG')
+    date=context.previous_date
+    top = 10
+    df = DividendRatio2(date,top)
+    # df = DividendRatio(securitys,date,top)
+    
+    # log.info("df!!!!!");
+    # log.info(df);
+    
+    g.security = [];
+    for i in range(0,top):
+        current = df.loc[i];
+        if current['DividendRatio'] < 0.04:
+            continue;
+        # log.info("current:%s" % (current));
+        security = normalize_code(current['SecuCode']);
+        g.security.append(security)
+        # if len(g.security) > 3:
+        #     break;
+        
+    log.info("choosePool")
+    log.info(len(g.security));
+    
+    log.info("df.loc");
+    first = df.loc[0];
+    log.info("first!!!");
+    log.info(first);
+    
+def DividendRatio2(end_date,top=50):
+    syldf = get_fundamentals(query(
+        valuation.code, valuation.pe_ratio
+    ).filter(
+        valuation.pe_ratio < 25,
+        valuation.pe_ratio > 10
+    ).order_by(
+        # 按市值降序排列
+        valuation.market_cap.desc()
+    ).limit(
+        # 最多返回100个
+        100
+    ), date=end_date)
+
+    security_list = [];
+    for i in range(0,len(syldf)):
+        current = syldf.loc[i];
+        # log.info("current:%s" % (current));
+        security_list.append(current['code'])
+    
+    # security_list = financial_data_filter_dayu(security_list, indicator.inc_revenue_year_on_year, 0)
+    # security_list = financial_data_filter_dayu(security_list, indicator.inc_net_profit_year_on_year, 0)
+    
+    # log.info(security_list)
+    return DividendRatio(security_list,end_date,top);
+    
+def DividendRatio(security_list,end_date,top=50):
+    '''查询股息率(日更新)    注意3000条限制,超限时获取的数据将不完整甚至报错
+    输入:股票池,截止日期,获取数量
+    输出:panel结构,单位:1'''
+    trade_days = get_trade_days(end_date=end_date,count = 1)
+    security_list.sort()
+    # log.info("security_list %s" % security_list);
+    secu_list = [x[:6] for x in security_list]
+    # log.info("secu_list %s" % secu_list);
+    code_df = jy.run_query(query(
+         jy.SecuMain.InnerCode,jy.SecuMain.SecuCode,
+    #     jy.SecuMain.ChiName,jy.SecuMain.CompanyCode
+        ).filter(jy.SecuMain.SecuCategory == 1,
+        jy.SecuMain.SecuCode.in_(secu_list)).order_by(jy.SecuMain.SecuCode))
+    
+    # log.info(len(code_df))
+    # log.info(len(security_list))
+    # log.info(code_df)
+    # log.info(security_list)
+    
+    # code_df['code'] = security_list
+
+    df = jy.run_query(query(
+#         jy.LC_DIndicesForValuation    #得到整表
+        jy.LC_DIndicesForValuation.InnerCode,
+                jy.LC_DIndicesForValuation.TradingDay,
+                 jy.LC_DIndicesForValuation.DividendRatio,
+                ).filter(jy.LC_DIndicesForValuation.InnerCode.in_(code_df.InnerCode),
+                        jy.LC_DIndicesForValuation.TradingDay.in_(trade_days)
+                        ))
+    
+    # df = pd.concat([df,code_df],axis=1)
+    df = pd.merge(df, code_df, on = 'InnerCode')
+              
+    df = df.sort(columns = ['DividendRatio'],axis = 0,ascending = False)
+    df.reset_index(inplace=True)
+    df = df.loc[0:top];
+    
+    return df

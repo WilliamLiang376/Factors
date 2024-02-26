@@ -1,0 +1,163 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/23331
+# 标题：年化70%，近三年还有效的小市值策略
+# 作者：赖皮瓜
+# 回测需要选择 python 2 .
+
+
+# 导入函数库
+import jqdata
+
+# 总市值<20亿，不包含创业板，不包含ST，非停牌股，市值最小的一个股
+# 持股30天，当收益率>25%坚定持有，除非最高收益回落2%，当个股收益<-8%进行止损
+# 如果刚卖掉一个股，那么20天内不能再买同一个股。
+# 初始化函数，设定基准等等
+def initialize(context):
+    set_option("avoid_future_data", True)
+    # 设定沪深300作为基准
+    set_benchmark('000300.XSHG')
+    # 开启动态复权模式(真实价格)
+    set_option('use_real_price', True)
+    # 输出内容到日志 log.info()
+    log.info('初始函数开始运行且全局只运行一次')
+    # 过滤掉order系列API产生的比error级别低的log
+    # log.set_level('order', 'error')
+    
+    ### 股票相关设定 ###
+    # 股票类每笔交易时的手续费是：买入时佣金万分之三，卖出时佣金万分之三加千分之一印花税, 每笔交易佣金最低扣5块钱
+    set_order_cost(OrderCost(close_tax=0.001, open_commission=0.0003, close_commission=0.0003, min_commission=5), type='stock')
+    
+    #持股周期30天
+    g.period = 30
+    g.day_count=0
+    g.bad_day=5 #20天内不可以选之前清仓的股票
+    ## 运行函数（reference_security为运行时间的参考标的；传入的标的只做种类区分，因此传入'000300.XSHG'或'510300.XSHG'是一样的）
+      # 开盘前运行
+    run_daily(before_market_open, time='before_open', reference_security='000300.XSHG') 
+      # 开盘时运行
+    run_daily(market_open, time='open', reference_security='000300.XSHG')
+      # 收盘后运行
+    run_daily(after_market_close, time='after_close', reference_security='000300.XSHG')
+    
+    
+    g.open_security = '000002.XSHE'
+    g.security_highprice = 0
+    g.bWithdrawal = False
+    
+## 开盘前运行函数     
+def before_market_open(context):
+  
+    # 要操作的股票：平安银行（g.为全局变量）
+    g.security = '000001.XSHE'
+
+    # 给微信发送消息（添加模拟交易，并绑定微信生效）
+    send_message('美好的一天~')
+    #有仓位就不要选股
+    if context.portfolio.positions:
+        return
+    
+    allStocks = get_all_securities(['stock'])
+    #过滤新股,过滤创业板，过滤市值
+    stocks = allStocks[(context.current_dt.date() - allStocks.start_date) > datetime.timedelta(20)].index
+    current_data = get_current_data()
+    g.stocklist = [stock for stock in stocks if not current_data[stock].is_st and current_data[stock].name.find('退') ==-1 \
+    and stock[0:3] != '300' and not current_data[stock].paused]
+    
+    q=query(valuation.code).filter(valuation.code.in_(g.stocklist)).filter( valuation.market_cap<20)
+    
+    df = get_fundamentals(q.order_by(valuation.market_cap.asc()).limit(1))
+    if not df.empty:
+        g.security=df['code'][0]
+        if g.security == g.open_security: #新选择与之前开仓是同一个股票，需要满足负面影响期20天
+            g.bad_day -= 1
+            if g.bad_day >0:
+                g.security = '000001.XSHE'
+        
+    print g.security
+    
+## 开盘时运行函数
+def market_open(context):
+    g.day_count+= 1
+    #如果当前不空仓，是不能开新仓的
+    if len(context.portfolio.positions)==0 :
+        g.day_count = 1
+        # 全仓买进
+        if g.security != '000001.XSHE':
+            open_order = order_value(g.security, context.portfolio.available_cash)
+            if open_order and open_order.status== OrderStatus.held:
+                log.info("全仓买进%s:%s" %(open_order.security , open_order.filled))
+                g.security_highprice=open_order.price
+                g.open_security = g.security
+            else:
+                log.info("股票买入失败")
+        else:
+            g.day_count=0
+            log.info("未选出合适的股票")
+    else:
+        log.info("Open第%d天" %g.day_count)
+ 
+## 收盘后运行函数  
+def after_market_close(context):
+  pass  
+
+def close_positions(context):
+    if context.portfolio.positions:
+                    log.info("==> 清仓，卖出所有股票")
+                    for stock in context.portfolio.positions.keys():
+                        position = context.portfolio.positions[stock]
+                        security = position.security
+                        myorder=order(security, -position.closeable_amount)
+                        if myorder:
+                            if myorder.status == OrderStatus.held:
+                                log.info("清仓完毕")
+                                g.bWithdrawal = False
+                                g.security_highprice = 0
+                                g.bad_day=5
+                                g.day_count =0
+                                return True
+    return False
+
+def handle_data(context, data):
+    
+    #达到或超过持股周期后，进行清仓换股
+    #如果累积涨幅超过25%,将进入回落清仓流程（最高值回落达到2%）
+    if g.day_count >1:
+        position=context.portfolio.positions[g.open_security]
+        current_price=data[position.security].price
+        open_price=position.avg_cost
+        if current_price > g.security_highprice:
+            g.security_highprice = current_price
+        
+        if ((current_price-open_price)/open_price >=0.25):
+                        g.bWithdrawal = True
+                        log.info("累积涨幅超过25%,进入回撤计算时间")
+            
+        if g.day_count >=g.period and not g.bWithdrawal:
+            #计算累积涨幅
+            log.info("第%d天" %g.day_count)
+            if not data[position.security].paused:
+                if context.current_dt.hour == 14 and context.current_dt.minute == 58:
+                    #清仓时间到
+                    if ((current_price-open_price)/open_price >=0.25):
+                        g.bWithdrawal = True
+                        log.info("累积涨幅超过25%,进入回撤计算时间")
+                    else:
+                        log.info("14:58清仓时间")
+                        if close_positions(context):
+                            g.day_count=0
+        elif g.day_count>1:
+            #计算是否止损
+            if current_price<open_price:
+                if ((current_price-open_price)/open_price<= -0.08):
+                    #止损
+                    log.info("当前价格:%f, 开仓价格:%f, 收益:%f " %(current_price,open_price,(current_price-open_price)/open_price))
+                    if close_positions(context):
+                        g.day_count=0
+            elif g.bWithdrawal == True:
+                log.info("回撤率计算")
+                if (current_price-g.security_highprice)/g.security_highprice <= -0.02 :
+                    log.info("回撤超过2%")
+                    if close_positions(context):
+                        g.day_count=0
+                

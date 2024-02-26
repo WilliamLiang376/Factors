@@ -1,0 +1,119 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/19201
+# 标题：买不到710亿爆款基金怎么办？自己做一个量化价值成长策略吧
+# 作者：对冲王语嫣
+
+# 相关聚宽文章：https://www.joinquant.com/view/community/detail/19201
+# 标题：对冲王语嫣量化价值成长策略
+# 作者：对冲王语嫣
+
+# 每个季度刷新组合
+
+# 本策略请选择 python 2 下回测
+
+
+# 导入函数库
+from jqdata import *
+
+# 初始化函数，设定基准等
+def initialize(context):
+    set_option("avoid_future_data", True)
+    g.roe_thres = [0.0,1000.0]
+    g.pb_thres  = [0.0,10.0] 
+    g.stocknum  = 20
+    # 设定沪深300作为基准
+    set_benchmark('000300.XSHG')
+    # 开启动态复权模式(真实价格)
+    set_option('use_real_price', True)
+    # 输出内容到日志 log.info()
+    log.info('初始函数开始运行且全局只运行一次')
+    # 过滤掉order系列API产生的比error级别低的log
+    log.set_level('order', 'error')
+
+    ### 股票相关设定 ###
+    # 股票类每笔交易时的手续费是：买入时佣金万分之三，卖出时佣金万分之三加千分之一印花税, 每笔交易佣金最低扣5块钱
+    set_order_cost(OrderCost(close_tax=0.001, open_commission=0.0003, close_commission=0.0003, min_commission=5), type='stock')
+
+    ## 运行函数（reference_security为运行时间的参考标的；传入的标的只做种类区分，因此传入'000300.XSHG'或'510300.XSHG'是一样的）
+      # 每个月第一个交易日开盘时运行
+    run_monthly(period, 1, time='open', reference_security='000300.XSHG')
+    run_monthly(after_market_close, 1, time='close', reference_security='000300.XSHG')
+
+## 开盘前运行函数
+def period(context):
+    # 每个季度第一个交易日运行
+    if context.current_dt.month in [1,4,7,11]:
+        # 输出运行时间
+        log.info('函数运行时间(period)：'+str(context.current_dt.time()))
+        # 给微信发送消息（添加模拟交易，并绑定微信生效）
+        # send_message('美好的一天~')
+    
+        # 设置可行股票池：获得当前的中证800股票池并剔除当前停牌股
+        sc_universe = get_index_stocks('000906.XSHG')
+        #print(len(sc_universe))
+        df_suspended = get_price(sc_universe, end_date=context.current_dt, frequency='daily', fields=['paused'], skip_paused=False, count=1)['paused'].T
+        df_suspended.columns=['is_suspended']
+        # 剔除当前停牌股票
+        sc_universe = df_suspended[df_suspended['is_suspended']==0].index
+        #print(len(sc_universe))
+        
+        # 取出在sc_universe内的所有股票的PB和扣非ROE值
+        q=query(valuation.day,valuation.code,valuation.pb_ratio,indicator.pubDate,indicator.statDate,
+                    indicator.inc_return  #扣非ROE
+                    #indicator.roe        #ROE
+                      ).filter(
+                          valuation.code.in_(sc_universe)
+                      ).order_by(
+                          valuation.pb_ratio.asc()
+                      )
+        df = get_fundamentals(q)
+        df.dropna()
+        df['roe_yearly'] = df.apply(lambda x: 4*x['inc_return'] if datetime.datetime.strptime(x['statDate'],"%Y-%m-%d").month!=12 else x['inc_return'],axis=1)
+        #df['roe_yearly'] = df.apply(lambda x: 4*x['roe'] if datetime.datetime.strptime(x['statDate'],"%Y-%m-%d").month!=12 else x['roe'],axis=1)
+        df = df[(df.pb_ratio>g.pb_thres[0]) & (df.pb_ratio < g.pb_thres[1])]
+        df = df[(df.roe_yearly>g.roe_thres[0]) & (df.roe_yearly<g.roe_thres[1])]
+        df['pb_score'] = (df['pb_ratio']-df['pb_ratio'].std()) / df['pb_ratio'].mean()
+        df['roe_score'] = (df['roe_yearly']-df['roe_yearly'].std()) / df['roe_yearly'].mean()
+        df['total_score'] = df['pb_score'] - df['roe_score'] 
+        df = df.sort('total_score', ascending=True)
+
+        df.reset_index(drop=True, inplace=True)
+        #print(df)
+        df = df[0:g.stocknum]
+        
+        target_list = list(df['code'])
+    
+        # 对于每个当下持有的股票进行判断：现在是否已经不在target_list里，如果是则卖出
+        for stock in context.portfolio.positions:
+            if stock not in target_list: #如果stock不在target_list
+                order_target(stock, 0) #调整stock的持仓为0，即卖出
+        
+        buylist = list(set(target_list) - set(context.portfolio.positions.keys()))
+        if len(buylist) > 0:
+            # 将资金分成len(buylist)份
+            position_per_stk = context.portfolio.available_cash / len(buylist)
+              # 用position_per_stk大小的 len(buylist) 份资金去买buylist中的股票
+            for stock in buylist:
+                order_value(stock, position_per_stk)
+
+        print('code\t' + 'init_time' + 'avg_cost\t' + 'price\t' + 'total_amount\t' + 'value')
+        for stock in context.portfolio.positions:      
+            print(stock + '\t' + str(context.portfolio.positions[stock].init_time) 
+                        + '\t' + str(context.portfolio.positions[stock].avg_cost) 
+                        + '\t' + str(context.portfolio.positions[stock].price) 
+                        + '\t' + str(context.portfolio.positions[stock].total_amount) 
+                        + '\t' + str(context.portfolio.positions[stock].value))
+
+## 收盘后运行函数
+def after_market_close(context):
+    # 只有在每个季度第一个交易日运行
+    if context.current_dt.month in [1,4,7,11]:
+        log.info(str('函数运行时间(after_market_close):'+str(context.current_dt.time())))
+        #得到当天所有成交记录
+        trades = get_trades()
+        for _trade in trades.values():
+            log.info('成交记录：'+str(_trade))
+        #log.info('当前持仓：\n' + context.portfolio.positions)
+        log.info('一天结束')
+        log.info('##############################################################')

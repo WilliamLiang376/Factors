@@ -1,0 +1,24 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/view/community/detail/20e4342de41086d57b759818fe69005d?type=1
+# 标题 指数估值自动报表系统——源代码
+
+
+from jqdata import *
+import datetime
+# 导入批数估值模块
+# from index_valuation import *
+
+def initialize(context):
+    run_daily(option, time='7:00', reference_security='000300.XSHG')
+
+def option(context):
+    # 加时间限制，以免重复发送
+    if context.current_dt.year != datetime.datetime.now().year\
+    or context.current_dt.month != datetime.datetime.now().month\
+    or context.current_dt.day != datetime.datetime.now().day:
+        return
+    else:
+        send_message()
+    
+    

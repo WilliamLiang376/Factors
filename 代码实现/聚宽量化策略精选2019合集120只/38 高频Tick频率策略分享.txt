@@ -1,0 +1,119 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 只能在tick级别的回测和模拟
+
+"""
+概率游戏
+"""
+def initialize(context):
+    init_cash = context.portfolio.starting_cash 
+    set_subportfolios([SubPortfolioConfig(cash=init_cash, type='futures')])
+    set_slippage(StepRelatedSlippage(0.5),type='futures',ref = 'C') 
+    
+    g.security_stoploss = 0.03
+    g.security_stopprofit = 0.01
+
+def after_code_changed(context):
+    unschedule_all
+    set_slippage(StepRelatedSlippage(0),type='futures',ref = 'C') 
+    set_order_cost(OrderCost(open_tax=0, close_tax=0, open_commission=0, close_commission=0, close_today_commission=0, min_commission=0), type='futures')
+
+    g.quit = False
+    run_daily(before_market_open, time='08:31', reference_security='C9999.XDCE')
+    run_daily(before_market_open, time='20:59', reference_security='C9999.XDCE') 
+    
+def handle_tick(context, tick):
+    if g.quit == False:
+        buy(context)
+        risk_management(context)
+
+def before_market_open(context):
+    print('#'*50)
+    if g.quit == False:
+        g.dominant_future = get_dominant_future('C')
+        subscribe(g.dominant_future, 'tick')
+
+def buy(context):
+    hold_security = check_buy_secutity_today(context)
+    g.buy_amount = get_buy_amount(context)
+    if hold_security == False:
+        buy_sort = order(g.dominant_future, g.buy_amount , side='short', pindex=0)
+        buy_long = order(g.dominant_future, g.buy_amount , side='long', pindex=0)
+    
+def check_buy_secutity_today(context):
+    long_keys = context.portfolio.long_positions.keys()
+    short_keys = context.portfolio.short_positions.keys()
+    key_num = len(long_keys) + len(short_keys)
+    if key_num > 0:
+        return True
+    else:
+        return False
+
+def risk_management(context):
+    security_stoploss(context,loss=g.security_stoploss)
+    security_stopprofit(context, profit=g.security_stopprofit)
+    futures_risk(context)
+
+def security_stoploss(context,loss):
+    if len(context.portfolio.long_positions)>0:
+        for stock in context.portfolio.long_positions.keys():
+            avg_cost = context.portfolio.long_positions[stock].avg_cost # 开仓均价
+            current_price = context.portfolio.long_positions[stock].price
+            _loss = (1 - current_price*1.0/avg_cost)*10
+            if _loss >= loss:
+                closeable_amount = context.portfolio.long_positions[stock].closeable_amount
+                orders = order(stock, -closeable_amount, side='long')
+                orders = order(stock, g.buy_amount, side='short')
+    
+    if len(context.portfolio.short_positions)>0:
+        for stock in context.portfolio.short_positions.keys():
+            avg_cost = context.portfolio.short_positions[stock].avg_cost
+            current_price = context.portfolio.short_positions[stock].price
+            _loss = (current_price*1.0/avg_cost - 1)*10
+            if _loss >= loss:
+                closeable_amount = context.portfolio.short_positions[stock].closeable_amount
+                orders = order(stock, -closeable_amount, side='short')
+                orders = order(stock, g.buy_amount, side='long')
+
+def security_stopprofit(context, profit):
+    if len(context.portfolio.long_positions)>0:
+        for stock in context.portfolio.long_positions.keys():
+            avg_cost = context.portfolio.long_positions[stock].avg_cost
+            current_price = context.portfolio.long_positions[stock].price
+            _profit = (current_price*1.0/avg_cost - 1)*10
+            if _profit >= profit:
+                closeable_amount = context.portfolio.long_positions[stock].closeable_amount
+                orders = order(stock, -closeable_amount, side='long')
+                
+    if len(context.portfolio.short_positions)>0:
+        for stock in context.portfolio.short_positions.keys():
+            avg_cost = context.portfolio.short_positions[stock].avg_cost
+            current_price = context.portfolio.short_positions[stock].price
+            _profit = (1 - current_price*1.0/avg_cost)*10
+            if _profit >= profit:
+                closeable_amount = context.portfolio.short_positions[stock].closeable_amount
+                orders = order(stock, -closeable_amount, side='short')
+                
+def futures_risk(context):
+    returns = context.portfolio.returns
+    if returns < -0.5:
+        clear_position(context)
+        g.quit = True
+    
+def clear_position(context):
+    short_hold_security = context.portfolio.short_positions.keys()
+    if len(short_hold_security) != 0:
+        for stock in short_hold_security:
+            orders = order_target(stock,0,side='short')
+    
+    long_hold_security = context.portfolio.long_positions.keys()
+    if len(long_hold_security) != 0:
+        for stock in long_hold_security:
+            orders = order_target(stock,0,side='long')
+            
+def get_buy_amount(context):
+    available_cash = context.portfolio.available_cash
+    current_price = get_current_tick(g.dominant_future)['current']
+    per_cash = current_price* 10 * 0.07
+    amount = round(available_cash*0.5 / per_cash, 0) 
+
+    return amount

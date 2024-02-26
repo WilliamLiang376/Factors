@@ -1,0 +1,300 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/16618
+# 标题：基于主成分分析 沪深300个股一致性IF股指交易策略
+# 作者：cicikml
+# 回测选择 python 2  ，资金选择 300万 。
+
+from jqdata import*
+import numpy as np
+import pandas as pd
+import talib
+
+
+#初始化策略
+def initialize(context):
+    set_params(context)
+    set_trade(context)
+    set_run_time()
+   
+#设置参数
+def set_params(context):
+    g.ben_list=list(get_index_stocks('000300.XSHG'))#基础池沪深300
+    g.timeback=20
+    g.std_uni_list=[]
+    g.std_uni=0
+    g.future='IF'
+    g.starting_cash=context.portfolio.starting_cash
+    g.trade_sign=0
+    g.dom=None
+    g.heavey_hold=0.1
+    '''
+    g.change_hold=20
+    g.if_trade=True
+    g.if_trade_clock=0
+    '''
+    g.trend=10
+    g.ATR=None
+    g.long_tradebook={}
+    g.short_tradebook={}
+    g.ATR=None
+    g.stoptimes=2
+    g.not_reenter_long=True
+    g.not_reenter_short=True
+    g.reenter_clock_long=0
+    g.reenter_clock_short=0
+    g.move_average_term=10
+    g.rest_day=10
+    g.if_trade=True
+    g.if_trade_clock=0
+    
+    
+#初始交易设置
+def set_trade(context):
+    #初始滑点设置为0
+    set_slippage(FixedSlippage(0))
+    #开启真实价格动态复权模式
+    set_option('use_real_price', True)
+    #过滤掉错误以下的日志
+    log.set_level('order', 'error')
+    #设置为可交易期货金融账户
+    set_subportfolios([SubPortfolioConfig(cash=context.portfolio.starting_cash, type='futures')])
+    #设置保证金比例为15%
+    set_option('futures_margin_rate.IF', 0.15)
+    #设置手续费，单边万五，双边千一
+    set_order_cost(OrderCost(open_tax=0, close_tax=0.0005, open_commission=0.0005, close_commission=0.0005, close_today_commission=0, min_commission=5), type='futures')
+    g.dom=get_dominant_future('IF')
+       
+
+#定时运行函数
+def set_run_time():
+    run_daily(set_before_market, time='08:30')
+    run_daily(pre_not_reenter)
+    run_daily(trade)
+    run_daily(loststop)
+   
+   
+class Tradetick(object):
+    def __init__(self,price,side,now_hand):
+        self.side=side
+        self.price=price
+        self.high_price=price
+        self.low_price=price
+        self.hand=now_hand
+    def update_price(self,input_price):
+        higher_price=max(self.high_price,input_price)
+        self.high_price=higher_price
+        lower_price=min(self.low_price,input_price)
+        self.low_price=lower_price
+       
+       
+'''
+================================================================================
+开盘前更新
+================================================================================
+'''
+def set_before_market(context):
+    dom=get_dominant_future('IF')
+    if dom!='':
+        if dom!=g.dom:
+            change_old_ins(context,'IF')
+
+   
+       
+'''
+================================================================================
+交易数据处理
+================================================================================
+'''
+#交易逻辑主体
+def trade(context):
+    creat_trade(g.ben_list,context)
+    if g.if_trade==True:
+        rebalance(context)
+        g.if_trade=False
+    else:
+        g.if_trade_clock+=1
+        if g.if_trade_clock==15:
+            g.if_trade=True
+            g.if_trade_clock=0
+       
+   
+   
+#交易信号产生     
+def creat_trade(stock_list,context):
+    uniformity_today=uniformity_cal(stock_list)
+    move_average_uni()
+    #若一致性指标强则进入开仓方向判断
+    if g.std_uni!=0:
+        if uniformity_today>g.std_uni:
+       
+            index_price='IF8888.CCFX'
+            price_IF=attribute_history(index_price,g.trend, '1d', fields=['close'])['close']
+            dom=get_dominant_future('IF')
+            if dom!='':
+                print(price_IF[-1]-price_IF[0])
+            #如果近日为涨则做多股指
+                if price_IF[-1]>price_IF[0] :
+                    g.trade_sign=1
+            #近日为跌则做空股指
+                elif price_IF[-1]<price_IF[0] :
+                    g.trade_sign=-1
+                else:
+                    g.trade_sign=0
+            else:
+                g.trade_sign=0
+        else:
+            g.trade_sign=0
+
+#定义交易
+def rebalance(context):
+    if g.trade_sign!=0:
+        dom=get_dominant_future('IF')
+        now_price=get_price(dom, end_date=context.current_dt, frequency='1d', fields=['open'],count=1)['open']
+        open_price=now_price[-1]
+        if dom!='':
+            if g.trade_sign==1 and g.not_reenter_long==False and len(g.std_uni_list)>=g.move_average_term:
+                order_target(dom, 0,  side='short')
+                g.short_tradebook={}
+                log.info('已平空仓')
+                order_value(dom,g.heavey_hold*g.starting_cash, side='long')
+                hand=g.heavey_hold*g.starting_cash/((300*open_price)*0.15)
+                Trade=Tradetick(open_price,'long',hand)
+                g.long_tradebook[str(context.current_dt)[:10]]=Trade
+            if g.trade_sign==-1 and g.not_reenter_short==False and len(g.std_uni_list)>=g.move_average_term:
+                order_target(dom, 0,  side='long')
+                g.long_tradebook={}
+                log.info('已平多仓')
+                order_value(dom,g.heavey_hold*g.starting_cash, side='short')
+                hand=g.heavey_hold*g.starting_cash/((300*open_price)*0.15)
+                Trade=Tradetick(open_price,'short',hand)
+                g.short_tradebook[(str(context.current_dt)[:10])]=Trade
+ 
+
+'''
+================================================================================
+基础功能函数
+================================================================================
+'''
+#数据获取
+def stock_price_get(stock_list):
+    stock_price_dict={}
+    all_mat=[]
+    for stock in stock_list:
+        single_stock=get_bars(stock,g.timeback,'1d',['close'])['close']
+        all_mat.append(single_stock)
+    vic_mat=array(all_mat)
+    return vic_mat
+
+
+#计算一致性指标
+def uniformity_cal(stock_list):
+    #获取价格dateframe表格
+    price_dt=stock_price_get(stock_list)
+    #将dateframe转化为矩阵/数组 格式，去索引，去列名
+    #生成协方差矩阵
+    cov_mat=cov(price_dt)
+    #输出特征值和特征向量
+    symbol,sym_mat=np.linalg.eigh(cov_mat)
+    #计算一致系数
+    uniformity=max(symbol)/sum(symbol)
+    g.std_uni_list.append(uniformity)
+    return uniformity
+
+
+
+#期货换月移仓
+def change_old_ins(context,ins):
+    long_los=context.portfolio.long_positions
+    short_los=context.portfolio.short_positions
+    now_dom=get_dominant_future(ins)
+    now_price=get_price(now_dom, end_date=context.current_dt, frequency='1d', fields=['open'],count=1)['open']
+    open_price=now_price[-1]
+    if now_dom not in long_los.keys():
+        if len(long_los.keys())>=1:
+            Lasthold=long_los.keys()[0]
+            change_los=long_los[Lasthold].total_amount
+            order_target(Lasthold,0, side='long')
+            order_target(now_dom,change_los,side='long')
+            log.info('主力合约已更换,多头调换')
+            g.long_tradebook={}
+            Trade=Tradetick(open_price,'long',change_los)
+            g.long_tradebook[context.current_dt]=Trade
+        else:
+            pass
+    if now_dom not in short_los.keys():
+        if len(long_los.keys())>=1:
+            Lasthold=long_los.keys()[0]
+            change_los=short_los[Lasthold].total_amount
+            order_target(Lasthold,0, side='short')
+            order_target(now_dom,change_los,side='short')
+            log.info('主力合约已更换，空头调换')
+            g.long_tradebook={}
+            Trade=Tradetick(open_price,'short',change_los)
+            g.long_tradebook[context.current_dt]=Trade
+    g.dom=now_dom
+   
+
+#获取主力合约到期日
+def get_CCFX_end_date(fature_code):
+    return get_security_info(fature_code).end_date   
+   
+   
+#计算ATR
+def cal_ATR():
+    index_future='IF8888.CCFX'
+    dom=get_dominant_future('IF')
+    index_price=attribute_history(index_future, g.timeback,'1d', fields=['high','low','close'])
+    high=array(index_price['high'])
+    low=array(index_price['low'])
+    close=array(index_price['close'])
+    g.ATR=talib.ATR(high,low,close,timeperiod=14)
+   
+
+#吊灯止损
+def loststop(context):
+    cal_ATR()
+    dom=get_dominant_future('IF')
+    near_close_array=attribute_history(dom,1,unit='1d', fields=['close'])['close']
+    near_close=array(near_close_array[-1])
+    if len(g.long_tradebook)>0:
+        for date in g.long_tradebook.keys():
+            if g.long_tradebook[date]!=0:
+                g.long_tradebook[date].update_price(near_close)
+                if near_close+(g.stoptimes*g.ATR[-1])<=g.long_tradebook[date].high_price:
+                    order(dom,g.long_tradebook[date].hand ,side='short')
+                    g.long_tradebook[date]=0
+                    log.info(str(date)+'当日订单已平多止损')
+                    g.not_reenter_long=True
+    if len(g.short_tradebook)>0:
+        for date in g.short_tradebook.keys():
+            if g.short_tradebook[date]!=0:
+                g.short_tradebook[date].update_price(near_close)
+                if near_close-(g.stoptimes*g.ATR[-1])>=g.short_tradebook[date].low_price:
+                    order(dom,g.short_tradebook[date].hand ,side='long')
+                    g.long_tradebook[date]=0
+                    log.info(str(date)+'当日订单已平空止损')
+                    g.not_reenter_short=True
+
+
+#止损防重入模块
+def pre_not_reenter(context):
+    if g.not_reenter_long==True:
+        if g.reenter_clock_long==g.rest_day:
+            g.not_reenter_long=False
+            g.reenter_clock_long=0
+        else:
+            g.reenter_clock_long+=1
+    if  g.not_reenter_short==True:
+        if g.reenter_clock_short==g.rest_day:
+            g.not_reenter_short=False
+            g.reenter_clock_short=0
+        else:
+            g.reenter_clock_short+=1
+           
+def move_average_uni():
+    if len(g.std_uni_list)>=g.move_average_term:
+        arr_uni_list=array(g.std_uni_list)
+        current_uni=talib.MA(arr_uni_list,timeperiod=g.move_average_term)
+        g.std_uni=current_uni[-1]
+           

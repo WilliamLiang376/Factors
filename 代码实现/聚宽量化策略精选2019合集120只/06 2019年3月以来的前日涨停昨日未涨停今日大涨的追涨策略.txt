@@ -1,0 +1,129 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/19827
+# 标题：2019年3月以来的前日涨停昨日未涨停今日大涨的追涨策略
+# 作者：Yaroglek
+
+# 导入函数库
+from jqdata import *
+
+def filter_paused_stock(stock_list):
+    current_data = get_current_data()
+    return [stock for stock in stock_list if not current_data[stock].paused]
+    
+def delisted_filter(security_list):
+    current_data = get_current_data()
+    security_list = [stock for stock in security_list if not '退' in current_data[stock].name]
+    return security_list
+
+def st_filter(security_list):
+    current_data = get_current_data()
+    security_list = [stock for stock in security_list if not current_data[stock].is_st]
+    return security_list
+
+# 筛选涨停股票
+def high_limit_filter(stocks):
+    ret = []
+
+    cd = get_current_data()
+
+    for stock in stocks:
+        h = attribute_history(stock, 3, unit = '1d', fields = ('close', 'high_limit'), skip_paused = True)
+        
+        if (h.close[1] - h.close[0]) / h.close[0] > 0.095 and not (h.close[2] - h.close[1]) / h.close[1] > 0.095:
+            ret.append(stock)
+
+    return ret
+    
+def get_fullist(context):
+    stocks = get_index_stocks('000002.XSHG') + get_index_stocks('399106.XSHE')
+    stocks = [stock for stock in stocks if not stock.startswith('300')]
+    return list(stocks)
+
+# 初始化函数，设定基准等等
+def initialize(context):
+    set_option("avoid_future_data", True)
+    g.stocks = get_fullist(context)
+    g.stock = None
+    g.last_price = 0.00
+    # 设定沪深300作为基准
+    set_benchmark('000300.XSHG')
+    # 开启动态复权模式(真实价格)
+    set_option('use_real_price', True)
+    # 输出内容到日志 log.info()
+    log.info('初始函数开始运行且全局只运行一次')
+    # 过滤掉order系列API产生的比error级别低的log
+    # log.set_level('order', 'error')
+
+    ### 股票相关设定 ###
+    # 股票类每笔交易时的手续费是：买入时佣金万分之三，卖出时佣金万分之三加千分之一印花税, 每笔交易佣金最低扣5块钱
+    set_order_cost(OrderCost(close_tax=0.001, open_commission=0.0003, close_commission=0.0003, min_commission=5), type='stock')
+
+    ## 运行函数（reference_security为运行时间的参考标的；传入的标的只做种类区分，因此传入'000300.XSHG'或'510300.XSHG'是一样的）
+      # 开盘前运行
+    run_daily(before_market_open, time='before_open', reference_security='000300.XSHG')
+      # 开盘时运行
+    run_daily(market_sell, time='09:34', reference_security='000300.XSHG')
+    run_daily(market_buy, time='09:35', reference_security='000300.XSHG')
+    #run_daily(before_market_close, time='14:45', reference_security='000300.XSHG')
+      # 收盘后运行
+    run_daily(after_market_close, time='after_close', reference_security='000300.XSHG')
+
+## 开盘前运行函数
+def before_market_open(context):
+    # 输出运行时间
+    log.info('函数运行时间(before_market_open)：'+str(context.current_dt.time()))
+
+    # 给微信发送消息（添加模拟交易，并绑定微信生效）
+    # send_message('美好的一天~')
+    g.stocks = get_fullist(context)
+    g.stocks = filter_paused_stock(g.stocks)
+    g.stocks = delisted_filter(g.stocks)
+    g.stocks = st_filter(g.stocks)
+    g.stocks = high_limit_filter(g.stocks)
+    # 要操作的股票：平安银行（g.为全局变量）
+
+def market_sell(context):
+    current_data = get_current_data()
+    for stock in context.portfolio.positions.keys():
+        h = attribute_history(stock, 1, unit = '1d', fields = ('close'), skip_paused = True)
+        last_close = h.close[0]
+        current_price = current_data[stock].last_price
+        cost = context.portfolio.positions[stock].avg_cost
+        profit = (current_price - cost) / cost
+        change = (current_price - last_close) / last_close
+        init_time = context.portfolio.positions[stock].init_time
+        if change <= 0.00:
+            order_target(stock, 0)
+
+## 开盘时运行函数
+def market_buy(context):
+    current_data = get_current_data()
+    cash = context.portfolio.total_value
+    log.info('函数运行时间(market_open):'+str(context.current_dt.time()))
+    temp = {}
+    for stock in g.stocks:
+        h = attribute_history(stock, 1, unit = '1d', fields = ('close'), skip_paused = True)
+        last_close = h.close[0]
+        current_price = current_data[stock].last_price
+        change = (current_price - last_close) / last_close
+        if change >= 0.05 and current_price < current_data[stock].high_limit:
+            temp[change] = stock
+    temp = [temp[change] for change in sorted(temp.keys(), reverse = True)]
+    for stock in temp:
+        order_value(stock, cash / 1)
+
+def before_market_close(context):
+    current_data = get_current_data()
+    log.info('函数运行时间(market_open):'+str(context.current_dt.time()))
+    
+
+## 收盘后运行函数
+def after_market_close(context):
+    log.info(str('函数运行时间(after_market_close):'+str(context.current_dt.time())))
+    #得到当天所有成交记录
+    trades = get_trades()
+    for _trade in trades.values():
+        log.info('成交记录：'+str(_trade))
+    log.info('一天结束')
+    log.info('##############################################################')

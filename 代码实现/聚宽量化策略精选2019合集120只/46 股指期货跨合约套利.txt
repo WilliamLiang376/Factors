@@ -1,0 +1,87 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/19837
+# 标题：股指期货跨合约套利
+# 作者：归去来兮
+
+# 导入函数库
+from jqdata import *
+import datetime as dt
+import numpy as np
+
+'''回测从2018-1-22开始，IF1904 IF1906'''
+
+## 初始化函数，设定基准等等
+def initialize(context):
+    set_option("avoid_future_data", True)
+    # 设定沪深300作为基准
+    set_benchmark('000300.XSHG')
+    # 开启动态复权模式(真实价格)
+    set_option('use_real_price', True)
+    # 过滤掉order系列API产生的比error级别低的log
+    log.set_level('order', 'error')
+    ### 期货相关设定 ###
+    # 设定账户为金融账户
+    set_subportfolios([SubPortfolioConfig(cash=context.portfolio.starting_cash, type='index_futures')])
+    # 开盘前运行
+    run_daily( before_market_open, time='before_open', reference_security='IF1812.CCFX')
+    # 开盘时运行
+    run_daily( market_open, time='every_bar')
+'''
+================================================================================
+每天开盘前
+================================================================================
+'''
+#每天开盘前要做的事情
+def before_market_open(context):
+    #设置股票交易手续费
+    set_slip_fee(context)
+#根据不同的时间段设置滑点与手续费
+def set_slip_fee(context):
+    # 设置期货交易的滑点
+    set_slippage(StepRelatedSlippage(0))
+    # 根据不同的时间段设置手续费
+    today=context.current_dt
+    # 设置期货合约保证金和手续费
+    #2017-2-17调整平今仓位万分之9.2,2017-9-18起，调整为万分之6.9，2018-12-3起，万分之4.6,2019-4-22起，万分之3.45.买入时万分之0.23,卖出时万分之0.23,
+    if today<dt.datetime(2017,9,18):
+        set_order_cost(OrderCost(open_commission=0.000023, close_commission=0.000023,close_today_commission=0.00092), type='index_futures')
+        g.futures_margin_rate=0.2
+    elif today<dt.datetime(2018,12,3):
+        set_order_cost(OrderCost(open_commission=0.000023, close_commission=0.000023,close_today_commission=0.00069), type='index_futures')
+        g.futures_margin_rate=0.15
+    elif today<dt.datetime(2019,4,22):
+        set_order_cost(OrderCost(open_commission=0.000023, close_commission=0.000023,close_today_commission=0.00046), type='index_futures')
+        g.futures_margin_rate=0.1
+    else:
+        set_order_cost(OrderCost(open_commission=0.000023, close_commission=0.000023,close_today_commission=0.000345), type='index_futures')
+        g.futures_margin_rate=0.1
+    set_option('futures_margin_rate', g.futures_margin_rate)
+
+
+## 开盘时运行函数
+def market_open(context):
+    # 合约价格
+    IF1906 = attribute_history('IF1906.CCFX', 300, unit='1m',
+            fields=['close'],df=True)['close']#
+    IF1909=attribute_history('IF1909.CCFX', 300, unit='1m',
+            fields=['close'],df=True)['close']#
+    gap=IF1906-IF1909
+    IF1906_now=IF1906[-1]
+    IF1909_now=IF1909[-1]
+    gap_now=IF1906_now-IF1909_now
+    if context.portfolio.positions_value==0:
+        if gap_now>gap.quantile(0.9):
+            order_target('IF1906.CCFX', 1, side='short',close_today = False)
+            order_target('IF1909.CCFX', 1, side='long',close_today = False)
+    elif gap_now<gap.quantile(0.1):
+            order_target('IF1906.CCFX', 0, side='short',close_today = False)
+            order_target('IF1909.CCFX', 0, side='long',close_today = False)
+
+ 
+                
+
+        
+
+
+

@@ -1,0 +1,99 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/19351
+# 标题：来自JPMorgan的VaR+EXPMA风险仓位控制
+# 作者：Marshal
+# 回测资金 100万。
+
+# 导入函数库
+import pandas as pd
+import numpy as np
+import scipy as sp
+from jqdata import *
+import datetime as dt
+from jqdata import *
+import talib
+# 导入 technical_analysis 库
+from jqlib.technical_analysis import *
+
+'''
+================================================================================
+总体回测前
+================================================================================
+'''
+def initialize(context):
+    set_option("avoid_future_data", True)
+    g.position = 0.0 # 当前仓位
+    g.change = 0.0 # 仓位调整
+    set_benchmark('000300.XSHG')
+    set_option('use_real_price', True) 
+    log.set_level('order', 'error') 
+    #set_order_cost(OrderCost(close_tax = 0.001, open_commission = 0.0003, 
+    #                         close_commission = 0.0003, min_commission = 5), 
+    #                         type='stock')
+    run_daily(before_market_open, time='before_open')
+    run_daily(market_open, time='open')
+    run_daily(after_market_close, time='after_close')
+    
+'''
+================================================================================
+每天开盘前
+================================================================================
+'''
+def before_market_open(context):
+    g.security = '000300.XSHG'
+    R = 0
+    C = 0
+    R,C,Level = TREND(g.security,context.previous_date)
+    g.change = VaR_posit(g.security,R,C)/100
+    print(Level,g.change)
+    
+def TREND(security,date):
+    EMA12 =  EXPMA(security,date,timeperiod = 12)[security]
+    EMA50 =  EXPMA(security,date,timeperiod = 50)[security]
+    level = 1
+    #EMA
+    if EMA12 > EMA50 : 
+        level = 1
+    else:
+        level = 0 
+    R=[1.5,3.8] #风险敞口
+    C=[99.5,98] #置信区间
+    return R[level],C[level],level
+
+def VaR_posit(security,risk_exposure,CI_alpha): 
+    risk_exposure = risk_exposure
+    CI_alpha = CI_alpha #正态分布概率表，标准差倍数以及置信率
+    risk_money = -1* risk_exposure# 风险敞口
+    price  = attribute_history(security,125,'1d',['close'])
+    chage = price.pct_change().dropna(axis=0)
+    VaR = np.nanpercentile(chage,(100-CI_alpha))
+    target_value = risk_money/VaR
+    target_positions = round(target_value/1,6)
+    if target_positions >= 100: target_positions = 100
+    return target_positions
+    
+        
+'''
+================================================================================
+每天开盘时
+================================================================================
+'''
+def market_open(context):
+    
+    if g.change >= 0:
+        
+        change_value = g.change * context.portfolio.total_value
+        order_target_value(g.security, change_value)
+        
+        g.position = context.portfolio.positions_value/context.portfolio.total_value
+    
+'''
+================================================================================
+每天收盘后
+================================================================================
+'''
+def after_market_close(context):
+    print('当前仓位：%.2f'%g.position)
+    record(posit=round(g.position,2))
+    

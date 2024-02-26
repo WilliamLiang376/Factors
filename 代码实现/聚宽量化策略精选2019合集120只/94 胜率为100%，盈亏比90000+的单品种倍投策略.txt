@@ -1,0 +1,282 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/20922
+# 标题：胜率为100%，盈亏比90000+的单品种倍投策略
+# 作者：大鸭力
+# 回测使用 分钟 。
+
+#import tradestat
+from jqdata import finance
+import pandas as pd
+import numpy as nb
+import time
+import datetime as dt
+from datetime import timedelta
+
+
+## 初始化函数，设定要操作的股票、基准等等
+def initialize(context):
+    set_option("avoid_future_data", True)
+    # 设定沪深300作为基准
+    set_benchmark('000001.XSHG')
+    # 设操作股票
+    g.stock='000002.XSHE'
+       # 配置调仓时间（24小时分钟制）
+    g.adjust_position_hour = 14
+    g.adjust_position_minute = 55
+    # 调仓日计数器，单位：日
+    g.day_count = 0
+    #g.period =20
+    # True为开启动态复权模式，使用真实价格交易
+    set_option('use_real_price', True) 
+    # 设定成交量比例
+    set_option('order_volume_ratio', 1)
+    set_param()
+    # 股票类交易手续费是：买入时佣金万分之三，卖出时佣金万分之三加千分之一印花税, 每笔交易佣金最低扣5块钱
+    set_order_cost(OrderCost(open_tax=0, close_tax=0.001, \
+                             open_commission=0.0003, close_commission=0.0003,\
+                             close_today_commission=0, min_commission=5), type='stock')
+   
+
+#设置参数---------------------------------------------------------------------------------
+def set_param():
+    # 设定价格
+    g.low=get_bars(g.stock, count=1, unit='1m',include_now=True)['close'][-1]
+    g.high=g.low
+    g.price1=0
+    g.price2=0
+    g.price3=0
+    g.price4=0
+    g.price5=0
+    #投入资金
+    g.inv_cash1=0
+    g.inv_cash2=0
+    g.inv_cash3=0
+    g.inv_cash4=0
+    g.inv_cash5=0
+    #累计投入资金
+    g.acc_inv1=0
+    g.acc_inv2=0
+    g.acc_inv3=0
+    g.acc_inv4=0
+    g.acc_inv5=0
+    #成本价
+    g.chengben1= 0
+    g.chengben2= 0
+    g.chengben3= 0
+    g.chengben4= 0
+    g.chengben5= 0
+    #目标利润
+    g.profit_rate1=0.2
+    g.profit_rate2=0.2
+    g.profit_rate3=0.2
+    g.profit_rate4=1
+    g.profit_rate5=1
+    #目标价格
+    g.target_price1=0
+    g.target_price2=0
+    g.target_price3=0
+    g.target_price4=0
+    g.target_price5=0
+    #其他
+    g.chengben=0
+    g.profit_rate=0
+    g.target_price=0
+    g.bucang_price=0
+    g.bucang_value=0
+# 按分钟回测----------------------------------------------------------------------------------
+def handle_data(context, data):
+
+    # 获得当前时间
+    hour = context.current_dt.hour
+    minute = context.current_dt.minute
+    # 每天指定时间检查是否调仓并处理
+    if hour == g.adjust_position_hour and minute == g.adjust_position_minute:
+        do_handle_data(context, data)
+    
+    
+def do_handle_data(context, data):
+    now_price = get_bars(g.stock, count=1, unit='1m',include_now=True)['close'][-1]
+    get_init(context,data)
+    if g.day_count == 0:
+        get_init(context,data)
+        print("可用资金：" ) 
+        print(context.portfolio.cash)
+        if now_price>=g.price1:
+            value=g.acc_inv1
+            g.chengben=now_price
+            g.profit_rate=g.profit_rate1
+            g.target_price=g.chengben*(1+g.profit_rate)
+            g.bucang_price=g.price2
+            g.bucang_value=g.inv_cash2
+        elif now_price>g.price2:
+            value=g.acc_inv1
+            g.chengben=g.chengben1
+            g.target_price=g.target_price1
+            g.bucang_price=g.price2
+            g.bucang_value=g.inv_cash2
+        elif now_price>g.price3:
+            value=g.acc_inv2
+            g.chengben=g.chengben2
+            g.target_price=g.target_price2
+            g.bucang_price=g.price3
+            g.bucang_value=g.inv_cash3
+        elif now_price>g.price4:
+            value=g.acc_inv3
+            g.chengben=g.chengben3
+            g.target_price=g.target_price3
+            g.bucang_price=g.price4
+            g.bucang_value=g.inv_cash4
+        elif now_price>g.price5:
+            value=g.acc_inv4
+            g.chengben=g.chengben4
+            g.target_price=g.target_price4
+            g.bucang_price=g.price5
+            g.bucang_value=g.inv_cash5
+        else:
+            value=g.acc_inv5
+            g.chengben=g.chengben5
+            g.target_price=g.target_price5
+            g.bucang_price=0
+            g.bucang_value=0
+        order_target_value(g.stock, value)
+        g.day_count +=1
+        
+    else: 
+        if now_price>=g.target_price:# or g.day_count%g.period==0:
+            get_init(context,data)
+           
+            if now_price>g.price1:
+                value=g.acc_inv1
+                g.chengben=now_price
+                g.profit_rate=g.profit_rate1
+                g.target_price=g.chengben*(1+g.profit_rate)
+                g.bucang_price=g.price2
+                g.bucang_value=g.inv_cash2
+            elif now_price<=g.price1 and now_price>g.price2:
+                value=g.acc_inv1
+                g.chengben=g.chengben1
+                g.target_price=g.target_price1
+                g.bucang_price=g.price2
+                g.bucang_value=g.inv_cash2
+            elif now_price<=g.price2 and now_price>g.price3:
+                value=g.acc_inv2
+                g.chengben=g.chengben2
+                g.target_price=g.target_price2
+                g.bucang_price=g.price3
+                g.bucang_value=g.inv_cash3
+            elif now_price<=g.price3 and now_price>g.price4:
+                value=g.acc_inv3
+                g.chengben=g.chengben3
+                g.target_price=g.target_price3
+                g.bucang_price=g.price4
+                g.bucang_value=g.inv_cash4
+            elif now_price<=g.price4 and now_price>g.price5:
+                value=g.acc_inv4
+                g.chengben=g.chengben4
+                g.target_price=g.target_price4
+                g.bucang_price=g.price5
+                g.bucang_value=g.inv_cash5
+            elif now_price<=g.price5:
+                value=g.acc_inv5
+                g.chengben=g.chengben5
+                g.target_price=g.target_price5
+                g.bucang_price=0
+                g.bucang_value=0
+            order_target_value(g.stock, value)
+            g.day_count+=1
+        elif now_price<=g.bucang_price and g.bucang_price!=0:
+            if now_price<=g.price2 and now_price>g.price3: 
+                g.bucang_value=g.inv_cash2
+                g.chengben=g.chengben2
+                g.profit_rate=g.profit_rate2
+                g.target_price=g.chengben*(1+g.profit_rate)
+                g.bucang_price=g.price3
+            elif now_price<=g.price3 and now_price>g.price4:
+                g.bucang_value=g.inv_cash3
+                g.chengben=g.chengben3
+                g.profit_rate=g.profit_rate3
+                g.target_price=g.chengben*(1+g.profit_rate)
+                g.bucang_price=g.price4
+            elif now_price<=g.price4 and now_price>g.price5:
+                g.bucang_value=g.inv_cash4
+                g.chengben=g.chengben4
+                g.profit_rate=g.profit_rate4
+                g.target_price=g.chengben*(1+g.profit_rate)
+                g.bucang_price=g.price5
+            elif now_price<=g.price5:
+                g.bucang_value=g.inv_cash5
+                g.chengben=g.chengben5
+                g.profit_rate=g.profit_rate5
+                g.target_price=g.chengben*(1+g.profit_rate)
+                g.bucang_price=0
+            order_value(g.stock, g.bucang_value)
+            g.day_count +=1
+        
+# 获取初始值
+def get_init(context,data):
+   
+    #价格计算
+    hl=get_high_low(g.stock,g.low,g.high)
+    g.price1 = hl[0]
+    g.price5 = hl[1]
+    
+    rate=pow(g.price1/g.price5,0.25)
+    
+    g.price3=round((g.price2+g.price1)/2,2)
+    g.price2=round((g.price1+g.price3)/2,2)
+    g.price4=round((g.price3+g.price5)/2,2)
+    #投入资金
+    value_cash = context.portfolio.cash
+    g.inv_cash1=int(0.01*value_cash)
+    g.inv_cash2=int(0.02*value_cash)
+    g.inv_cash3=int(0.07*value_cash)
+    g.inv_cash4=int(0.2*value_cash)
+    g.inv_cash5=int(0.7*value_cash)
+    #累计投入资金
+    g.acc_inv1=int(g.inv_cash1)
+    g.acc_inv2=int(g.inv_cash1+g.inv_cash2)
+    g.acc_inv3=int(g.inv_cash1+g.inv_cash2+g.inv_cash3)
+    g.acc_inv4=int(g.inv_cash1+g.inv_cash2+g.inv_cash3+g.inv_cash4)
+    g.acc_inv5=int(g.inv_cash1+g.inv_cash2+g.inv_cash3+g.inv_cash4+g.inv_cash5)
+    #成本价
+    g.chengben1= g.acc_inv1/(g.inv_cash1/g.price1)
+    g.chengben2= g.acc_inv2/(g.inv_cash1/g.price1+g.inv_cash2/g.price2)
+    g.chengben3= g.acc_inv3/(g.inv_cash1/g.price1+g.inv_cash2/g.price2+g.inv_cash3/g.price3)
+    g.chengben4= g.acc_inv4/(g.inv_cash1/g.price1+g.inv_cash2/g.price2+g.inv_cash3/g.price3+g.inv_cash4/g.price4)
+    g.chengben5= g.acc_inv5/(g.inv_cash1/g.price1+g.inv_cash2/g.price2+g.inv_cash3/g.price3+g.inv_cash4/g.price4+g.inv_cash5/g.price5)
+    #目标价格
+    g.target_price1=g.chengben1*(g.profit_rate1+1)
+    g.target_price2=g.chengben2*(g.profit_rate2+1)
+    g.target_price3=g.chengben3*(g.profit_rate3+1)
+    g.target_price4=g.price1*(1-0.4*(1-g.price4/g.price1))
+    g.target_price5=g.price1*(1-0.4*(1-g.price5/g.price1))
+    #目标利润
+    g.profit_rate1=g.target_price1/g.chengben1-1
+    g.profit_rate2=g.target_price2/g.chengben2-1
+    g.profit_rate3=g.target_price3/g.chengben3-1
+    g.profit_rate4=g.target_price4/g.chengben4-1
+    g.profit_rate5=g.target_price5/g.chengben5-1  
+    
+    print(g.price1,g.price2,g.price3,g.price4,g.price5)
+    print(g.inv_cash1,g.inv_cash2,g.inv_cash3,g.inv_cash4,g.inv_cash5)
+    print(g.chengben1,g.chengben2,g.chengben3,g.chengben4,g.chengben5)
+    print(g.profit_rate1,g.profit_rate2,g.profit_rate3,g.profit_rate4,g.profit_rate5)
+    print(g.target_price1,g.target_price2,g.target_price3,g.target_price4,g.target_price5)
+
+# 股票最高最低价
+def get_high_low(security,ulow,uhigh):
+    
+    c_list=[]
+    lc = attribute_history(security, count=3, unit='1d',fields=['open', 'close'],skip_paused=True, df=True, fq='pre')['close']
+    for i in range(len(lc)):
+        if not isnan(lc[i]):
+            c=lc[i]
+            c_list.append(c)
+    high=max(max(c_list),uhigh)
+    low=min(min(c_list),ulow)
+    g.high=high
+    g.low=low
+    return high,low
+
+

@@ -1,0 +1,265 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/view/community/detail/16318
+# 回测时请把资金选择为 100万
+
+# 导入函数库
+from jqdata import *
+import numpy as np
+
+## 初始化函数，设定基准等等
+def initialize(context):
+    # 设定银华日利作为基准
+    set_benchmark('511880.XSHG')
+    #设置日志输出级别
+    log.set_level('order', 'error')
+    set_parameter(context)
+    ### 期货相关设定 ###
+    # 设定账户为金融账户
+    set_subportfolios([SubPortfolioConfig(cash=context.portfolio.starting_cash, type='futures')])
+
+    # 期货类每笔交易时的手续费是：买入时万分之1,卖出时万分之1,平今仓为万分之1
+    set_order_cost(OrderCost(open_commission=0.0001, close_commission=0.0001,close_today_commission=0.0001), type='index_futures')
+    
+    #获取可操作资金
+    g.init_cash = context.portfolio.starting_cash
+    
+    #主力合约记录
+    g.main_rb = get_dominant_future('RB', date=context.current_dt)
+    g.main_i = get_dominant_future('I', date=context.current_dt)
+    g.main_j = get_dominant_future('J', date=context.current_dt)
+    
+    # 设定保证金比例
+    set_option('futures_margin_rate', 0.10)
+
+    # 设置滑点（单边万5，双边千1）
+    set_slippage(PriceRelatedSlippage(0.00),type='future')
+
+    # 开盘时运行
+    run_daily( market_open, time='open', reference_security='RB8888.XSGE')
+    # 收盘后运行
+    run_daily( after_market_close, time='after_close', reference_security='RB8888.XSGE')
+
+# 参数设置函数
+def set_parameter(context):
+    
+    #利润回归模型
+    g.ma = 15 
+    g.up_std = 1.8
+    g.down_std=1.8
+    g.state = 0
+    
+    #利润系数
+    #参考研报内容 钢厂利润公式 钢厂利润= 1*螺纹钢期货价格- 1.6*铁矿石期货价格+0.5*焦炭期货价格+其他成本
+    g.x=1
+    g.y=1.6
+    g.z=0.5
+    
+    #风控部分
+    g.risk_days = 10 
+    g.tot_values  = [context.portfolio.starting_cash]*g.risk_days
+    g.maxdown = 0.03 #最大回撤设置
+    
+## 开盘时运行函数
+def market_open(context):
+    
+    #风控部分
+    #触发风控规则10天内保持空仓
+    if g.risk_days < 10:
+        #清空持仓
+        hold_future_s = context.portfolio.short_positions.keys() 
+        hold_future_l = context.portfolio.long_positions.keys()
+        #对合约标的全部清空
+        if len(hold_future_s)>0:
+            print('触发风控平空仓')
+            for future_s in hold_future_s:
+                order_target_value(future_s,0,side='short')
+        if len(hold_future_l)>0:
+            print('触发风控平多仓')
+            for future_l in hold_future_l:
+                order_target_value(future_l,0,side='long')   
+    else:
+        #运行风控函数
+        risk = rolling_risk(context)  #滚动计算策略回撤
+        if risk:
+            pass  
+        #未触发风控逻辑执行交易逻辑
+        else:
+            trade(context)
+    g.risk_days += 1 #风控天数累加
+
+#交易主体部分
+def trade(context):
+    #获取几个标的的指数价格序列
+    price_df = history(50,security_list=['RB8888.XSGE','I8888.XDCE','J8888.XDCE','JM8888.XDCE','RB9999.XSGE','I9999.XDCE','J9999.XDCE','JM9999.XDCE'])
+    #获取钢厂利润
+    se = g.x*price_df['RB8888.XSGE'] - g.y*price_df['I8888.XDCE'] - g.z*price_df['J8888.XDCE']
+    #资金比例
+    #由三者的系数推出资金权重比例
+    a,b,c = g.y*g.z,g.x*g.z,g.y*g.z
+    #初始资金的十分之一
+    cash = g.init_cash*0.1
+    
+    #资金分配
+    cash_i = (b/(a+b+c))*cash
+    cash_j = (c/(a+b+c))*cash
+    cash_rb = (a/(a+b+c))*cash
+    
+
+    #获取交易信号
+    trade_signal = get_signal(se.values)
+
+    #根据交易信号进行交易
+    #获取标的的主力合约
+    main_rb = get_dominant_future('RB', date=context.current_dt)
+    main_i = get_dominant_future('I', date=context.current_dt)
+    main_j = get_dominant_future('J', date=context.current_dt)
+    
+    #获取当前持仓的合约
+    hold_future_s = context.portfolio.short_positions.keys()
+    hold_future_l = context.portfolio.long_positions.keys()
+                
+    #交易部分
+    if trade_signal > 1: #下穿上轨
+        print('触发交易信号：空螺纹钢、多铁矿石、焦煤')
+        #对非主力合约的空仓标的全部清空
+        if len(hold_future_s)>0:
+            for future_s in hold_future_s:
+                if future_s != main_rb:
+                    order_target_value(future_s,0,side='short')
+        #做空螺纹钢主力
+        order_target_value(main_rb,cash_rb, side='short')
+        
+        #对非主力合约的多仓的标的全部清空
+        if len(hold_future_l)>0:
+            for future_l in hold_future_l:
+                if (future_l != main_i) and (future_l != main_j):
+                    order_target_value(future_l,0,side='long')
+        #做多铁矿石、焦煤主力
+        order_target_value(main_i,cash_i, side='long')
+        order_target_value(main_j,cash_j, side='long')
+        
+    elif trade_signal < -1: #上穿下轨
+        print('触发交易信号：多螺纹钢、空铁矿石、焦煤')
+        #对非主力合约的多仓的标的全部清空
+        if len(hold_future_l)>0:
+            for future_l in hold_future_l:
+                if future_l != main_rb:
+                    order_target_value(future_l,0,side='long')
+        #做多螺纹钢主力
+        order_target_value(main_rb,cash_rb, side='long')
+
+        #对非主力合约的空仓标的全部清空
+        if len(hold_future_s)>0:
+            for future_s in hold_future_s:
+                if (future_s != main_i) and (future_s != main_j):
+                    order_target_value(future_s,0,side='short')
+        #做空铁矿石、焦煤主力
+        order_target_value(main_i,cash_i, side='short')
+        order_target_value(main_j,cash_j, side='short')
+
+    #移仓换月逻辑
+    #主力合约变更进行换仓
+    if g.main_rb != main_rb:
+        print('rb主力合约由%s变化为%s'%(g.main_rb,main_rb))
+        if g.main_rb in hold_future_s:
+            order_target_value(g.main_rb,0,side='short')
+            order_target_value(main_rb,cash_rb,side='short')
+        elif g.main_rb in hold_future_l:
+            order_target_value(g.main_rb,0,side='long')
+            order_target_value(main_rb,cash_rb,side='long')
+            
+    if g.main_j != main_j:
+        print('j主力合约由%s变化为%s'%(g.main_j,main_j))
+        if g.main_j in hold_future_s:
+            order_target_value(g.main_j,0,side='short')
+            order_target_value(main_j,cash_j,side='short')
+        elif g.main_j in hold_future_l:
+            order_target_value(g.main_j,0,side='long')
+            order_target_value(main_j,cash_j,side='long')
+        
+    if g.main_i != main_i:
+        print('i主力合约由%s变化为%s'%(g.main_i,main_i))
+        if g.main_i in hold_future_s:
+            order_target_value(g.main_i,0,side='short')
+            order_target_value(main_i,cash_i,side='short')
+        elif g.main_i in hold_future_l:
+            order_target_value(g.main_i,0,side='long')
+            order_target_value(main_i,cash_i,side='long')
+    #更新主力合约记录
+    g.main_rb = main_rb
+    g.main_j  = main_j
+    g.main_i  = main_i 
+    
+#策略滚动回撤
+def rolling_risk(context):
+    #记录21天内最大回撤数值
+    value = context.portfolio.total_value 
+    g.tot_values.append(value)
+    #更新账户总价值
+    g.tot_values = g.tot_values[1:]
+    max_down = 1 - value*1.0/max(g.tot_values)
+    #设置最大回撤阈值触发止损信号
+    if max_down >= g.maxdown:
+        print('触发滚动最大回撤，进行清仓')
+        g.risk_days = 0
+        g.tot_values = [value]*10  #账户价值序列重置
+        return 1  
+    else:
+        return 0
+        
+#获取交易信号   
+def get_signal(se):
+    #最新价格
+    price_now = se[-1]
+    se_temp = se[-g.ma:]
+    mid = np.mean(se_temp)
+    up  = mid + g.up_std*np.std(se_temp)
+    down= mid - g.down_std*np.std(se_temp)
+    signal = 0
+    
+    #进行状态记录
+    #当前价格所在轨道区间
+    if price_now>up:
+        state_new = 2
+    elif price_now < down:
+        state_new = -2
+    elif price_now > mid:
+        state_new = 1  
+    elif price_now < mid:
+        state_new = -1
+    else:
+        state_new = 0
+        
+    #进行信号判断
+    #记录上下穿越轨道的信号
+    #下穿上轨
+    if g.state==2 and state_new <2:
+        signal=2
+    #上穿下轨
+    elif g.state==-2 and state_new >-2:
+        signal=-2
+    elif g.state<0 and state_new > 0:
+        signal=1  
+    elif g.state>0 and state_new <0:
+        signal= -1
+    else:
+        signal= 0
+    #更新轨道区间状态
+    g.state = state_new
+    
+    return signal  
+    
+## 收盘后运行函数
+def after_market_close(context):
+    
+    cash_ratio = 1 - context.portfolio.available_cash*1.0/context.portfolio.total_value
+    print('当日策略资金占用比例为:%s'%cash_ratio)
+    
+    l_hold_future = context.portfolio.long_positions.keys()
+    s_hold_future = context.portfolio.short_positions.keys()
+    
+    for future in l_hold_future:
+        print('%s有多头持仓:%s'% (future,context.portfolio.long_positions[future].total_amount))
+    for future in s_hold_future:
+        print('%s有空头持仓:%s'% (future,context.portfolio.short_positions[future].total_amount))

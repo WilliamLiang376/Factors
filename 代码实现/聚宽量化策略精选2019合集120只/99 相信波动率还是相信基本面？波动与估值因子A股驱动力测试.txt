@@ -1,0 +1,260 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/view/community/detail/17255
+# 标题：相信波动率还是相信基本面？波动与估值因子A股驱动力测试
+
+# 本策略请选择 python 2 下回测，回测资金要调大些。
+
+
+import numpy as np
+import pandas as pd
+import time 
+from datetime import date
+from jqdata import *
+import statsmodels.api as sm
+
+
+'''
+================================================================================
+总体回测前
+================================================================================
+'''
+#总体回测前要做的事情
+def initialize(context):
+    set_params()        #1 设置策参数
+    set_variables()     #2 设置中间变量
+    set_backtest()      #3 设置回测条件
+    # 定时运行函数（reference_security为运行时间的参考标的；传入的标的只做种类区分，因此传入'000300.XSHG'或'510300.XSHG'是一样的）
+    # 开盘前运行，按月运行，每个月初获取holding_list
+    run_monthly(before_market_open, monthday = 1, time = 'before_open', reference_security='000906.XSHG')
+    # 开盘时运行，交易函数，按日运行，每天调仓
+    run_daily(market_open, time = 'open', reference_security = '000906.XSHG')
+    # 收盘后运行
+    run_daily(after_market_close, time='after_close', reference_security='000906.XSHG')
+
+    
+#设置策参数
+def set_params():
+    g.yb = 63               # 定义计算波动因子观测期长度
+    g.shift = 63            # g.shift天未停牌的股票
+    g.percent = 0.1         # 持仓比例
+    g.index = '000906.XSHG' # 定义基准中证800
+    g.short_d = 10           # 定义短期均线的计算区间2,5,10
+    g.long_d = 60           # 定义长期均线的计算区间20,40,60
+    # 'wave','value',
+    '''
+    分别为波动、估值
+    全文仅仅在此处进行修改，要测试哪个因子，就把g.factor改为该因子
+    '''
+    # 设定要检测的因子
+    g.factor = 'value'
+    # 按照factors的值排序，True为值小的在前面，False为值大的在前面
+    g.factor_sort = {'wave':True,'value':True}
+
+
+#设置中间变量
+def set_variables():
+    g.feasible_stocks = []  # 当前可交易股票池
+    g.holding_list = []     # 定义全局holding_list
+    g.buy_list = []         # 择时信号为买入的股票列表
+    g.sell_list = []        # 择时信号为卖出的股票列表
+
+
+#设置回测条件
+def set_backtest():
+    set_benchmark('000906.XSHG')                    # 以中证800为基准
+    set_option('use_real_price', True)              # 用真实价格交易
+    log.info('初始函数开始运行且全局只运行一次')    # 输出内容到日志 log.info()
+    log.set_level('order', 'error')                 # 设置报错等级，过滤掉order系列API产生的比error级别低的log
+
+
+'''
+================================================================================
+每天开盘前
+================================================================================
+'''
+# 每天开盘前要做的事情
+def before_market_open(context):
+    # 输出运行时间
+    log.info('函数运行时间(before_market_open)：'+str(context.current_dt.time()))
+    # 设置手续费与滑点
+    set_slip_fee(context) 
+    # 设置可行股票池：获得当前开盘的中证800股票池并剔除当前或者计算样本期间停牌的股票
+    g.feasible_stocks = set_feasible_stocks(get_index_stocks('000906.XSHG'),g.shift,context)
+    # 获取g.holding_list
+    g.holding_list = get_holding_list(context)
+    
+
+# 根据不同的时间段设置滑点与手续费
+def set_slip_fee(context):
+    # 将滑点设置为0
+    set_slippage(FixedSlippage(0)) 
+    # 根据不同的时间段设置手续费
+    dt=context.current_dt
+
+    if dt>datetime.datetime(2013,1, 1):
+        set_commission(PerTrade(buy_cost=0.0003, sell_cost=0.0013, min_cost=5)) 
+        
+    elif dt>datetime.datetime(2011,1, 1):
+        set_commission(PerTrade(buy_cost=0.001, sell_cost=0.002, min_cost=5))
+            
+    elif dt>datetime.datetime(2009,1, 1):
+        set_commission(PerTrade(buy_cost=0.002, sell_cost=0.003, min_cost=5))
+                
+    else:
+        set_commission(PerTrade(buy_cost=0.003, sell_cost=0.004, min_cost=5))
+
+
+# 设置可行股票池：
+# 过滤掉当日停牌的股票,且筛选出前days天未停牌股票
+# 输入：stock_list-list类型,样本天数days-int类型，context（见API）
+# 输出：可行股票池-list类型
+def set_feasible_stocks(stock_list,days,context):
+    # 得到是否停牌信息的dataframe，停牌的1，未停牌得0
+    suspened_info_df = get_price(list(stock_list), start_date=context.current_dt, end_date=context.current_dt, frequency='daily', fields='paused')['paused'].T
+    # 过滤停牌股票 返回dataframe
+    unsuspened_index = suspened_info_df.iloc[:,0]<1
+    # 得到当日未停牌股票的代码list:
+    unsuspened_stocks = list(suspened_info_df[unsuspened_index].index)
+    # 进一步，筛选出前days天未曾停牌的股票list:
+    feasible_stocks=[]
+    current_data=get_current_data()
+    for stock in unsuspened_stocks:
+        if sum(attribute_history(stock, days, unit='1d', fields=('paused'), skip_paused=False))[0]==0:
+            feasible_stocks.append(stock)
+            
+    return feasible_stocks
+
+
+# 获取holding_list
+def get_holding_list(context):
+    # 1、获取波动因子数据，该df的index为code
+    df_wave = get_df_wave(g.feasible_stocks,context)
+    # 2、获取价值因子数据，该df的index为code
+    df_value = get_df_value(g.feasible_stocks,context)
+
+    # 各个因子值合并
+    df_factors = pd.concat([df_wave,df_value],axis = 1)
+    
+    # 按照factors排序，True为值小的在前面，False为值大的在前面
+    stocks = list(df_factors.sort(g.factor,ascending = g.factor_sort[g.factor]).index)
+    # 获取前10%支股票为holding_list
+    holding_list = stocks[0:int(len(stocks)*g.percent)]
+
+    return holding_list
+
+
+# 获取波动率数据
+def get_df_wave(stocks_list,context):
+    ## 获取历史波动率，index为code
+    # 获取过去1+g.yb期间的股价
+    price = get_price(stocks_list,end_date = context.previous_date,count = 1+g.yb,fields = ['close'])['close']
+    # 计算收益率
+    ret = price/price.shift(1) - 1
+    ret = ret.iloc[1:,:]
+    # 计算收益率的标准差，得到历史波动率
+    his_wave = pd.DataFrame(ret.std())
+    his_wave.columns = ['his_wave']
+    # z值处理
+    his_wave = (his_wave - his_wave.mean())/his_wave.std()
+    # 获取下跌波动率，index为code
+    down_wave = pd.DataFrame(std_ud(ret))
+    down_wave.columns = ['down_wave']
+    # z值处理
+    down_wave = (down_wave - down_wave.mean())/down_wave.std()
+    # 历史波动率与下跌波动率等权相加
+    df_wave = pd.concat([his_wave,down_wave],axis = 1)
+    df_wave['wave'] = df_wave['his_wave'] * 0.5 + df_wave['down_wave'] * 0.5
+    # 删除无用数据
+    del df_wave['his_wave']
+    del df_wave['down_wave']
+    # 去除nan
+    df_wave = df_wave.dropna()
+    
+    return df_wave
+
+
+# 获取估值因子数据
+def get_df_value(stocks_list,context):
+    # 获取pb pe ps数据
+    q = query(valuation.pb_ratio,valuation.pe_ratio,valuation.ps_ratio,valuation.code).filter(valuation.code.in_(stocks_list))
+    factor_data = get_fundamentals(q, date = context.previous_date)
+    # z值处理
+    factor_data.index = factor_data['code']
+    del factor_data['code']
+    factor_data = (factor_data - factor_data.mean())/factor_data.std()
+    # 计算价值因子
+    df_value = pd.DataFrame((factor_data['pb_ratio']+factor_data['pe_ratio']+factor_data['ps_ratio'])/3)
+    df_value.columns = ['value']
+    
+    return df_value
+
+
+# 计算下跌波动率，传入一个收益率df，返回一个Series
+def std_ud(df,ud='d'):
+    # flag标明是上还是下
+    if ud=='u':
+        flag = (df>df.mean())
+    if ud=='d':
+        flag = (df<df.mean())
+        
+    # 方差
+    square_sum = (((df-df.mean())*flag)**2).sum()
+    
+    return (square_sum/(len(df)-1))**0.5
+    
+    
+'''
+================================================================================
+每天交易时
+================================================================================
+'''
+# 每天开盘时要做的事
+def market_open(context):
+    # 输出运行时间
+    log.info('函数运行时间(market_open)：'+str(context.current_dt.time()))
+    # 调仓
+    rebalance(context,g.holding_list)
+    # 重置买卖信号
+    g.buy_list = []
+    g.sell_list = []
+
+
+# 依本策略的买入信号，得到应该买的股票列表
+# 借用买入信号结果，不需额外输入
+# 输入：context，holding_list（见API）
+def rebalance(context, holding_list):
+    # 每只股票购买金额
+    every_stock = context.portfolio.portfolio_value/len(holding_list)
+    
+    # 空仓只有买入操作
+    if len(list(context.portfolio.positions.keys())) == 0:
+        for stock_to_buy in holding_list:
+            order_target_value(stock_to_buy, every_stock)
+    else :
+        # 不是空仓先卖出持有但是不在购买名单中的股票
+        for stock_to_sell in list(context.portfolio.positions.keys()):
+            # 如果不在holding_list，卖出
+            if stock_to_sell not in holding_list:
+                order_target_value(stock_to_sell, 0)
+        # 因order函数调整为顺序调整，为防止先行调仓股票由于后行调仓股票占金额过大不能一次调整到位，这里运行两次以解决这个问题
+        for stock_to_buy in holding_list:
+            order_target_value(stock_to_buy, every_stock)
+        for stock_to_buy in holding_list:
+            order_target_value(stock_to_buy, every_stock)
+            
+    print('hold_stocks:',context.portfolio.positions.keys())
+    
+            
+'''
+================================================================================
+每天收盘后
+================================================================================
+'''
+#每天收盘后要做的事情
+def after_market_close(context):
+    log.info(str('函数运行时间(after_trading_end):'+str(context.current_dt.time())))
+    log.info('一天结束')
+    log.info('##############################################################')
+
+

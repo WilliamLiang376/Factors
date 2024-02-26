@@ -1,0 +1,184 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/19254
+# 标题：股指期货&quot;蜘蛛网策略&quot; ——从成交持仓表中捕捉知情投资者行为
+# 作者：交易之道2015
+# 回测资金选择 100万  。
+
+# 导入函数库
+from jqdata import *
+
+## 初始化函数，设定基准等等
+def initialize(context):
+    set_option("avoid_future_data", True)
+    # 设置参数
+    #指标比较阈值
+    g.lamb = -0.06
+    g.buy_or_Sell = 0
+    g.code = 'IF' #交易品种
+    g.change_main = 0 #主力合约是否切换
+    
+    # 设定沪深300作为基准
+    set_benchmark('000300.XSHG')
+    # 开启动态复权模式(真实价格)
+    set_option('use_real_price', True)
+    # 过滤掉order系列API产生的比error级别低的log
+    # log.set_level('order', 'error')
+
+    ### 期货相关设定 ###
+    # 设定账户为金融账户
+    set_subportfolios([SubPortfolioConfig(cash=context.portfolio.starting_cash, type='index_futures')])
+    # 期货类每笔交易时的手续费是：买入时万分之0.23,卖出时万分之0.23,平今仓为万分之23
+    set_order_cost(OrderCost(open_commission=0.000023, close_commission=0.000023,close_today_commission=0.0023), type='index_futures')
+    # 设定保证金比例
+    set_option('futures_margin_rate', 0.15)
+
+    # 设置期货交易的滑点
+    set_slippage(StepRelatedSlippage(1))
+    # 运行函数（reference_security为运行时间的参考标的；传入的标的只做种类区分，因此传入'IF1512.CCFX'或'IH1602.CCFX'是一样的）
+      # 开盘前运行
+    run_daily( before_market_open, time='before_open', reference_security='IF1512.CCFX')
+      # 开盘时运行
+    run_daily( market_open, time='open', reference_security='IF1512.CCFX')
+      # 收盘后运行
+    run_daily( after_market_close, time='after_close', reference_security='IF1512.CCFX')
+
+## 开盘前运行函数
+def before_market_open(context):
+    # 输出运行时间
+    log.info('函数运行时间(before_market_open)：'+str(context.current_dt.time()))
+    
+    #判断今日是否换月
+    today = context.current_dt
+    pre_day = context.previous_date
+    if get_dominant_future(g.code,date=today)==get_dominant_future(g.code,date=pre_day):
+        g.change_main = 0
+    else:
+        g.change_main = 1
+        
+    #计算指标，并生成买卖信号
+    future_code = get_dominant_future(g.code)
+    ITS,UTS,MDS = get_member_sentiment(pre_day,future_code)
+    if ITS>g.lamb:
+        g.buy_or_sell = 1
+    else:
+        g.buy_or_sell = -1
+
+
+## 开盘时运行函数
+def market_open(context):
+    log.info('函数运行时间(market_open):'+str(context.current_dt.time()))
+    
+    future_code = get_dominant_future(g.code)
+    
+    ####################交易#####################
+    if g.change_main == 1:
+        try:
+            order_target(context.portfolio.short_positions.key, 0, side='short')
+            order_target(context.portfolio.long_positions.key, 0, side='long')
+        except:
+            pass
+        if g.buy_or_sell == 1:
+            order_target(future_code, 1, side='long')
+        else:
+            order_target(future_code, 1, side='short')
+    else:
+        if g.buy_or_sell == 1:
+            order_target(future_code, 1, side='long')
+        else:
+            order_target(future_code, 1, side='short')
+
+### 收盘后运行函数
+def after_market_close(context):
+    log.info('一天结束')
+    log.info('##############################################################')
+
+### 指标计算函数 
+def get_member_sentiment(day,future_code):
+    from jqdata import finance
+    import pandas as pd
+
+    """
+    输入：日期，具体的代码
+    输出：会员情绪指标
+    """
+    #获取数据:获得某天、某合约的成交量、持多、持空排名
+    q=query(finance.FUT_MEMBER_POSITION_RANK.day,
+            finance.FUT_MEMBER_POSITION_RANK.code,
+            finance.FUT_MEMBER_POSITION_RANK.rank_type,
+            finance.FUT_MEMBER_POSITION_RANK.rank,
+            finance.FUT_MEMBER_POSITION_RANK.member_name,
+            finance.FUT_MEMBER_POSITION_RANK.indicator,
+            finance.FUT_MEMBER_POSITION_RANK.indicator_increase).\
+            filter(finance.FUT_MEMBER_POSITION_RANK.code==future_code,
+                   finance.FUT_MEMBER_POSITION_RANK.day==day)
+    df=finance.run_query(q)  
+
+    #当日持仓量
+    opid = get_extras('futures_positions', future_code, start_date=day, end_date=day, df=True).iloc[0,0]
+    #当日成交量
+    vol = get_price(future_code, start_date=day, end_date=day, frequency='daily', fields='volume').iloc[0,0]
+    #该合约的持仓量比成交量
+    stat_contra =  opid/vol
+
+    #上榜会员单位交集、并集、差集
+    member_intersection = set(df[df['rank_type']=='成交量排名']['member_name'])&\
+                          set(df[df['rank_type']=='持买单量排名']['member_name'])&\
+                          set(df[df['rank_type']=='持卖单量排名']['member_name'])
+    member_all = set(df[df['rank_type']=='成交量排名']['member_name'])|\
+                 set(df[df['rank_type']=='持买单量排名']['member_name'])|\
+                 set(df[df['rank_type']=='持卖单量排名']['member_name'])
+    member_d = member_all-member_intersection
+   
+    #上三榜的会员
+    stat_mem = {}
+    for mem in member_intersection:
+        buy_tmp = df[(df['member_name']==mem)&(df['rank_type']=='持买单量排名')].indicator.tolist()[0]
+        sell_tmp = df[(df['member_name']==mem)&(df['rank_type']=='持卖单量排名')].indicator.tolist()[0]
+        vol_tmp = df[(df['member_name']==mem)&(df['rank_type']=='成交量排名')].indicator.tolist()[0]
+        stat_mem[mem] = (buy_tmp*1.0+sell_tmp*1.0)/vol_tmp
+
+    #筛选知情会员、非知情会员
+    #stat_df = pd.DataFrame(stat_mem,index=['stat']).T
+    Informed_Trader = []
+    Uninformed_Trader =[]
+    for key,value in stat_mem.items():
+        if value>stat_contra:
+            Informed_Trader.append(key)
+        else:
+            Uninformed_Trader.append(key)
+
+    #其它会员
+    temp = df.set_index('member_name').loc[member_d,:]
+    B_other = sum(temp[temp['rank_type']=='持买单量排名'].indicator)
+    S_other = sum(temp[temp['rank_type']=='持卖单量排名'].indicator)
+    stat_mem_other = (B_other+\
+                      S_other)/\
+                      sum(temp[temp['rank_type']=='成交量排名'].indicator)
+
+    #-----------------------计算相关指标
+    #其它会员为知情会员
+    if stat_mem_other>stat_contra:
+        temp2 = df.set_index('member_name').loc[Informed_Trader,:]
+        B = sum(temp2[temp2['rank_type']=='持买单量排名'].indicator)+B_other
+        S = sum(temp2[temp2['rank_type']=='持卖单量排名'].indicator)+S_other
+        ITS = (B-S)/(B+S)
+
+        temp3 = df.set_index('member_name').loc[Uninformed_Trader,:]
+        B = sum(temp2[temp2['rank_type']=='持买单量排名'].indicator)
+        S = sum(temp2[temp2['rank_type']=='持卖单量排名'].indicator)
+        UTS = (B-S)/(B+S)
+    else:
+        temp2 = df.set_index('member_name').loc[Informed_Trader,:]
+        B = sum(temp2[temp2['rank_type']=='持买单量排名'].indicator)
+        S = sum(temp2[temp2['rank_type']=='持卖单量排名'].indicator)
+        ITS = (B-S)/(B+S)
+
+        temp3 = df.set_index('member_name').loc[Uninformed_Trader,:]
+        B = sum(temp2[temp2['rank_type']=='持买单量排名'].indicator)+B_other
+        S = sum(temp2[temp2['rank_type']=='持卖单量排名'].indicator)+S_other
+        UTS = (B-S)/(B+S)
+
+    MSD = ITS-UTS
+    #data = pd.DataFrame([ITS,UTS,MSD],index=['ITS','UTS','MSD'],columns=[day]).T
+    return ITS,UTS,MSD

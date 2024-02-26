@@ -1,0 +1,293 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/21211
+# 标题：RSRS择时+机器学习选股
+# 作者：fireflytxy
+
+# 克隆自聚宽文章：https://www.joinquant.com/post/15002
+# 标题：价值选股与RSRS择时
+# 作者：K线放荡不羁
+
+# 本策略请选择 python 2 下回测
+
+'''
+策略思路：
+选股：财务指标选股
+择时：RSRS择时
+持仓：有开仓信号时持有10只股票，不满足时保持空仓
+
+'''
+# 导入函数库
+import statsmodels.api as sm
+from pandas.stats.api import ols
+
+import pandas as pd
+import numpy as np
+import math
+from sklearn.svm import SVR  
+from sklearn.model_selection import GridSearchCV  
+from sklearn.model_selection import learning_curve
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
+import jqdata
+
+# 初始化函数，设定基准等等
+def initialize(context):
+    set_option("avoid_future_data", True)
+    # 开启动态复权模式(真实价格)
+    set_option('use_real_price', True)
+    # 过滤掉order系列API产生的比error级别低的log
+    # log.set_level('order', 'error')
+    set_parameter(context)
+    ### 股票相关设定 ###
+    # 股票类每笔交易时的手续费是：买入时佣金万分之三，卖出时佣金万分之三加千分之一印花税, 每笔交易佣金最低扣5块钱
+    set_order_cost(OrderCost(close_tax=0.001, open_commission=0.0003, close_commission=0.0003, min_commission=5), type='stock')
+    
+    ## 运行函数（reference_security为运行时间的参考标的；传入的标的只做种类区分，因此传入'000300.XSHG'或'510300.XSHG'是一样的）
+      # 开盘前运行
+    run_daily(before_market_open, time='before_open', reference_security='000300.XSHG') 
+      # 开盘时运行
+    run_daily(market_open, time='open', reference_security='000300.XSHG')
+      # 收盘后运行
+    #run_daily(after_market_close, time='after_close', reference_security='000300.XSHG')
+    
+'''
+==============================参数设置部分================================
+'''
+def set_parameter(context):
+    #g.days = 0
+    g.refresh_rate = 10
+    set_order_cost(OrderCost(close_tax=0.001, open_commission=0.0003, close_commission=0.0003, min_commission=5), type='stock')
+    g.stocknum = 10
+    g.index2 = '000016.XSHG'  # 上证50指数
+    g.index8 = '399333.XSHE'  # 中小板R指数
+    g.index_growth_rate = 0.01    
+    
+    
+    # 设置RSRS指标中N, M的值
+    #统计周期
+    g.N = 18
+    #统计样本长度
+    g.M = 1100
+    #首次运行判断
+    g.init = True
+    #持仓股票数
+    #g.stock_num = 10
+    #风险参考基准
+    g.security = '000300.XSHG'
+    # 设定策略运行基准
+    set_benchmark(g.security)
+    #记录策略运行天数
+    g.days = 0
+    #set_benchmark(g.stock)
+    # 买入阈值
+    
+    g.buy = 0.7
+    g.sell = -0.7
+    #用于记录回归后的beta值，即斜率
+    g.ans = []
+    #用于计算被决定系数加权修正后的贝塔值
+    g.ans_rightdev= []
+    
+    # 计算2005年1月5日至回测开始日期的RSRS斜率指标
+    prices = get_price(g.security, '2005-01-05', context.previous_date, '1d', ['high', 'low'])
+    highs = prices.high
+    lows = prices.low
+    g.ans = []
+    for i in range(len(highs))[g.N:]:
+        data_high = highs.iloc[i-g.N+1:i+1]
+        data_low = lows.iloc[i-g.N+1:i+1]
+        X = sm.add_constant(data_low)
+        model = sm.OLS(data_high,X)
+        results = model.fit()
+        g.ans.append(results.params[1])
+        #计算r2
+        g.ans_rightdev.append(results.rsquared)
+    
+## 开盘前运行函数     
+def before_market_open(context):
+    # 输出运行时间
+    #log.info('函数运行时间(before_market_open)：'+str(context.current_dt.time()))
+    #g.days += 1
+    # 给微信发送消息（添加模拟交易，并绑定微信生效）
+    send_message('策略正常，运行交易第%s天~'%g.days)
+
+## 开盘时运行函数
+def market_open(context):
+    security = g.security
+    # 填入各个日期的RSRS斜率值
+    beta=0
+    r2=0
+    if g.init:
+        g.init = False
+    else:
+        #RSRS斜率指标定义
+        prices = attribute_history(security, g.N, '1d', ['high', 'low'])
+        highs = prices.high
+        lows = prices.low
+        X = sm.add_constant(lows)
+        model = sm.OLS(highs, X)
+        beta = model.fit().params[1]
+        g.ans.append(beta)
+        #计算r2
+        r2=model.fit().rsquared
+        g.ans_rightdev.append(r2)
+    
+    # 计算标准化的RSRS指标
+    # 计算均值序列    
+    section = g.ans[-g.M:]
+    # 计算均值序列
+    mu = np.mean(section)
+    # 计算标准化RSRS指标序列
+    sigma = np.std(section)
+    zscore = (section[-1]-mu)/sigma  
+    #计算右偏RSRS标准分
+    zscore_rightdev= zscore*beta*r2
+    
+    # 如果上一时间点的RSRS斜率大于买入阈值, 则全仓买入
+    if zscore_rightdev > g.buy:
+        # 记录这次买入
+        log.info("市场风险在合理范围")
+        #满足条件运行交易
+        trade_func(context)
+    # 如果上一时间点的RSRS斜率小于卖出阈值, 则空仓卖出
+    elif (zscore_rightdev < g.sell) and (len(context.portfolio.positions.keys()) > 0):
+        # 记录这次卖出
+        log.info("市场风险过大，保持空仓状态")
+        
+        # 卖出所有股票,使这只股票的最终持有量为0
+        for s in context.portfolio.positions.keys():
+            order_target(s, 0)
+        g.days = 0    
+#策略选股买卖部分 
+'''
+def trade_func(context):
+    #获取股票池
+    df = get_fundamentals(query(valuation.code,valuation.pb_ratio,indicator.roe))
+    #进行pb,roe大于0筛选
+    df = df[(df['roe']>0) & (df['pb_ratio']>0)].sort('pb_ratio')
+    #以股票名词作为index
+    df.index = df['code'].values
+    #取roe倒数
+    df['1/roe'] = 1/df['roe']
+    #获取综合得分
+    df['point'] = df[['pb_ratio','1/roe']].rank().T.apply(f_sum)
+    #按得分进行排序，取指定数量的股票
+    df = df.sort('point')[:g.stock_num]
+    pool = df.index
+    log.info('总共选出%s只股票'%len(pool))
+    #得到每只股票应该分配的资金
+    cash = context.portfolio.total_value/len(pool)
+    #获取已经持仓列表
+    hold_stock = context.portfolio.positions.keys() 
+    #卖出不在持仓中的股票
+    for s in hold_stock:
+        if s not in pool:
+            order_target(s,0)
+    #买入股票
+    for s in pool:
+        order_target_value(s,cash)
+'''
+#打分工具
+def f_sum(x):
+    return sum(x)
+
+def trade_func(context):
+
+    #gr_index8 = get_idx_growth_rate(context.previous_date)
+    #log.info("当前自定义指数指数的20日涨幅 [%.2f%%]" %(gr_index8*100))
+    if g.days % g.refresh_rate == 0:
+        sample = get_index_stocks('000985.XSHG', date = None)
+        q = query(valuation.code, valuation.market_cap, balance.total_assets - balance.total_liability,
+                  balance.total_assets / balance.total_liability, income.net_profit, income.net_profit + 1, 
+                  indicator.inc_revenue_year_on_year, balance.development_expenditure).filter(valuation.code.in_(sample))
+        df = get_fundamentals(q, date = None)
+        df.columns = ['code', 'log_mcap', 'log_NC', 'LEV', 'NI_p', 'NI_n', 'g', 'log_RD']
+        
+        df['log_mcap'] = np.log(df['log_mcap'])
+        df['log_NC'] = np.log(df['log_NC'])
+        df['NI_p'] = np.log(np.abs(df['NI_p']))
+        df['NI_n'] = np.log(np.abs(df['NI_n'][df['NI_n']<0]))
+        df['log_RD'] = np.log(df['log_RD'])
+        df.index = df.code.values
+        del df['code']
+        df = df.fillna(0)
+        df[df>10000] = 10000
+        df[df<-10000] = -10000
+        industry_set = ['801010', '801020', '801030', '801040', '801050', '801080', '801110', '801120', '801130', 
+                  '801140', '801150', '801160', '801170', '801180', '801200', '801210', '801230', '801710',
+                  '801720', '801730', '801740', '801750', '801760', '801770', '801780', '801790', '801880','801890']
+        
+        for i in range(len(industry_set)):
+            industry = get_industry_stocks(industry_set[i], date = None)
+            s = pd.Series([0]*len(df), index=df.index)
+            s[set(industry) & set(df.index)]=1
+            df[industry_set[i]] = s
+            
+        X = df[['log_NC', 'LEV', 'NI_p', 'NI_n', 'g', 'log_RD','801010', '801020', '801030', '801040', '801050', 
+                '801080', '801110', '801120', '801130', '801140', '801150', '801160', '801170', '801180', '801200', 
+                '801210', '801230', '801710', '801720', '801730', '801740', '801750', '801760', '801770', '801780', 
+                '801790', '801880', '801890']]
+        Y = df[['log_mcap']]
+        X = X.fillna(0)
+        Y = Y.fillna(0)
+        
+        svr = SVR(kernel='rbf', gamma=0.1) 
+        model = svr.fit(X, Y)
+        factor = Y - pd.DataFrame(svr.predict(X), index = Y.index, columns = ['log_mcap'])
+        factor = factor.sort_index(by = 'log_mcap')
+        stockset = list(factor.index[:10])
+        sell_list = list(context.portfolio.positions.keys())
+        for stock in sell_list:
+            if stock not in stockset[:g.stocknum]:
+                stock_sell = stock
+                order_target_value(stock_sell, 0)
+            
+        if len(context.portfolio.positions) < g.stocknum:
+            num = g.stocknum - len(context.portfolio.positions)
+            cash = context.portfolio.cash/num
+        else:
+            cash = 0
+            num = 0
+        for stock in stockset[:g.stocknum]:
+            if stock in sell_list:
+                pass
+            else:
+                stock_buy = stock
+                order_target_value(stock_buy, cash)
+                num = num - 1
+                if num == 0:
+                    break
+        g.days += 1
+    else:
+        g.days +=1
+          
+
+# 获取股票n日以来涨幅，根据当前价计算
+# n 默认20日
+def get_growth_rate(security, n=20):
+    lc = get_close_price(security, n)
+    #c = data[security].close
+    c = get_close_price(security, 1, '1m')
+    
+    if not isnan(lc) and not isnan(c) and lc != 0:
+        return (c - lc) / lc
+    else:
+        log.error("数据非法, security: %s, %d日收盘价: %f, 当前价: %f" %(security, n, lc, c))
+        return 0
+
+# 获取前n个单位时间当时的收盘价
+def get_close_price(security, n, unit='1d'):
+    return attribute_history(security, n, unit, ('close'), True)['close'][0]
+
+
+        
+## 收盘后运行函数  
+def after_market_close(context):
+    #得到当天所有成交记录
+    trades = get_trades()
+    for _trade in trades.values():
+        log.info('成交记录：'+str(_trade))
+    #打印账户总资产
+    log.info('今日账户总资产：%s'%round(context.portfolio.total_value,2))
+    #log.info('##############################################################')

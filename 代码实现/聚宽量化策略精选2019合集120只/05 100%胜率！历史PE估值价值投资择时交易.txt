@@ -1,0 +1,196 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/19593
+# 标题：100%胜率！历史PE估值价值投资择时交易
+# 作者：Marshal
+# 回测需要年度跨度大，资金需要选择 100万。
+
+from jqdata import *
+import pandas as pd
+import numpy as np
+import scipy.stats as stats
+import datetime
+import talib
+from jqlib.technical_analysis import *
+import math
+import statsmodels.api as sm
+
+'''
+========================================================================
+# 初始化函数，设定基准等等
+========================================================================
+'''
+def initialize(context):
+    set_option("avoid_future_data", True)
+    # 设定上证指数作为基准
+    set_default_params(context) #初始化系统参数
+    set_benchmark(g.security) ### 股票相关设定 ###
+    set_simulate_params(context) # 初始化模拟参数
+    set_firstrun_params(context) #初始化运行
+    set_spool_params(context) #股票池参数
+    g.Trading = 'open' #'open'
+    ## 开盘前运行函数 
+    # 开盘前运行
+    run_daily(before_market_open, time='before_open', reference_security=g.security) 
+    # 开盘时运行
+    run_daily(market_open, time = g.Trading, reference_security=g.security)
+    # 收盘后运行
+    run_daily(after_market_close, time='after_close', reference_security=g.security)
+    # 每月运行
+    run_monthly(code_run_monthly, 1, time='before_open')
+def set_default_params(context):
+    g.security = '000300.XSHG' #BENCHMARK
+    log.set_level('order', 'error') # 过滤掉order系列API产生的比error级别低的log
+    
+def set_simulate_params(context):
+    # 开启动态复权模式(真实价格)
+    set_option('use_real_price', True)
+    # 输出内容到日志 log.info()
+    log.info('初始函数开始运行且全局只运行一次')
+   
+def set_firstrun_params(context):
+    pass
+    
+def set_spool_params(context): ### 股票相关设定 ###    
+    pass
+
+def set_test_param(context):
+    ######实盘无效#######
+    # 开启动态复权模式(真实价格)
+    set_option('use_real_price', True)
+    # 股票类每笔交易时的手续费是：买入时佣金万分之三，卖出时佣金万分之三加千分之一印花税, 每笔交易佣金最低扣5块钱
+    #set_order_cost(OrderCost(close_tax=0.001, open_commission=0.0003, close_commission=0.0003, min_commission=5), type='stock')
+    #set_slippage(FixedSlippage(0.001))# 为全部交易品种设定固定值滑点
+    log.set_level('order', 'error')
+    # 过滤掉order系列API产生的比error级别低的log
+    ######实盘无效#######
+
+'''
+========================================================================
+## 设定每月运行
+========================================================================
+'''
+def code_run_monthly(context):
+    peq = PEQ(context.previous_date,g.security)
+    g.stdH,g.stdL = peq.STD()
+    
+'''
+========================================================================
+## 修改代码后运行
+========================================================================
+'''
+def after_code_changed(context): # 修改代码后运行
+    set_default_params(context) #初始化系统参数
+    set_firstrun_params(context) #初始化运行
+    set_spool_params(context) #股票池参数
+#def process_initialize(context):
+
+'''
+========================================================================
+## 开盘前运行函数
+========================================================================
+'''  
+def before_market_open(context):
+    # 输出运行时间
+    log.info('函数运行时间(before_market_open)：'+str(context.current_dt.time()))
+    g.positions_value = context.portfolio.positions_value #仓位价值
+    g.positions_keys = context.portfolio.positions.keys() #仓位信息
+    g.cash = context.portfolio.available_cash # 取得当前的现金
+    g.total_value = context.portfolio.total_value # 获取总资产
+    g.date = date = context.previous_date #获取昨天时间
+    
+    # 给微信发送消息（添加模拟交易，并绑定微信生效）
+    send_message('美好的一天，总资产为~%s'%g.total_value)
+    send_message('今天持股市值为~%s'%g.positions_value)
+    send_message('今天持股列表为~%s'%g.positions_keys)
+    print('total_value',g.total_value)
+    print('positions_value',g.positions_value)
+    print('positions_keys',g.positions_keys)
+
+'''
+========================================================================
+## 开盘时运行函数
+========================================================================
+'''  
+def market_open(context):
+    log.info('函数运行时间(market_open):'+str(context.current_dt.time()))
+    peq = PEQ(context.previous_date,g.security)
+    g.MA = peq.MA()
+    g.NOWPE = peq.NOW()
+    stock = g.security
+    
+    if g.NOWPE < g.stdL and g.MA > 1.01:
+       #买入持仓
+        log.info("买入 %s" % (stock))
+        # 用所有 cash 买入股票
+        order_value(stock, g.cash)
+        print(g.NOWPE,g.stdL,g.stdH)
+    elif g.NOWPE > g.stdH and g.MA < 1:
+       #卖出持仓
+        log.info("卖出 %s" % (stock))
+        # 卖出所有股票,使这只股票的最终持有量为0
+        order_target(stock, 0)
+        print(g.NOWPE,g.stdL,g.stdH)
+
+'''
+========================================================================
+## 收盘后运行函数 
+========================================================================
+'''     
+ 
+def after_market_close(context):
+    log.info(str('函数运行时间(after_market_close):'+str(context.current_dt.time())))
+    #得到当天所有成交记录
+    trades = get_trades()
+    for _trade in trades.values():
+        log.info('成交记录：'+str(_trade))
+    log.info('一天结束')
+    log.info('##############################################################') 
+    #RECORD
+    record(PE=g.NOWPE,H=g.stdH,L=g.stdL,MA=g.MA)
+    
+'''
+========================================================================
+## 功能函数
+========================================================================
+'''   
+from jqdata import finance
+from sklearn import linear_model
+from jqdata import *
+import scipy.stats as stats
+import numpy as np
+import pandas as pd
+import math
+
+class PEQ:
+    def __init__(self,date,security):
+        self.date = date 
+        self.security = security
+    def Q(self,count): #查询PE等数据修正后归为V
+        q=query(finance.STK_EXCHANGE_TRADE_INFO).filter(
+            finance.STK_EXCHANGE_TRADE_INFO.date <= self.date,
+            finance.STK_EXCHANGE_TRADE_INFO.exchange_code == '322002',
+        ).order_by(finance.STK_EXCHANGE_TRADE_INFO.date.desc()).limit(count)
+        df=finance.run_query(q)
+        DF = df[['date','pe_average','turnover_ratio']]
+        DF = DF.copy()
+        #DF['V'] = DF.apply(lambda x: np.sqrt(x.volume/1000)/ np.sqrt(x.circulating_market_cap) * np.log(x.pe_average), axis=1) # 
+        DF['V'] = DF.apply(lambda x: np.log10(x.pe_average), axis=1) # 
+        return DF
+    def STD(self): #获得中位数±1倍标准差
+        section = self.Q(2500).V
+        mean = section.mean()
+        median = section.median()
+        std = section.std()
+        return median+0.25*std,median-0.5*std
+    def NOW(self): #获得现在的数据值
+        return self.Q(1).V[0]
+    def MA(self):
+        date = self.date  
+        security = self.security
+        #p = get_price(security = security, count = 21, end_date = date, fields=['close'])
+        #MA1 = p.close[-5:].mean()
+        #MA2 = p.close[0:10].mean()
+        MA1 =  EXPMA(security,date,timeperiod = 5)[security]
+        MA2 =  EXPMA(security,date,timeperiod = 20)[security]
+        return MA1/MA2

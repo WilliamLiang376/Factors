@@ -1,0 +1,826 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/21375
+# 标题：宏观指标择时+roe 价值选股
+# 作者：阳光aaaa
+# 回测有点问题
+
+# 克隆自聚宽文章：https://www.joinquant.com/post/21349
+# 标题：宏观指标择时检测
+# 作者：大锐锐丶
+
+# 克隆自聚宽文章：https://www.joinquant.com/post/19349
+# 标题：择时，还是宏观数据靠谱（宏观择时集合）
+# 作者：云帆
+
+# 导入函数库
+from jqdata import *
+import tushare as ts
+import statsmodels.api as sm
+
+import numpy as np
+import pandas as pd
+import talib as tl
+import pickle
+import datetime
+import tushare as ts
+from six import StringIO
+import warnings
+warnings.filterwarnings('ignore')
+
+# 初始化函数，设定基准等等
+def initialize(context):
+    cpi_df=ts.get_cpi().set_index("month").sort_index().pct_change()
+    ppi_df=ts.get_ppi().set_index("month").sort_index().pct_change()
+    g.ppi_cpi_df=pd.concat([cpi_df,ppi_df],axis=1)
+    
+    g.stock_num = 3
+    # 设定沪深300作为基准
+    set_benchmark('000300.XSHG')
+    # 开启动态复权模式(真实价格)
+    set_option('use_real_price', True)
+    # 输出内容到日志 log.info()
+    log.info('初始函数开始运行且全局只运行一次')
+    # 过滤掉order系列API产生的比error级别低的log
+    # log.set_level('order', 'error')
+    set_params()
+    ### 股票相关设定 ###
+    # 股票类每笔交易时的手续费是：买入时佣金万分之三，卖出时佣金万分之三加千分之一印花税, 每笔交易佣金最低扣5块钱
+    set_order_cost(OrderCost(close_tax=0.001, open_commission=0.0003, close_commission=0.0003, min_commission=5), type='stock')
+
+    ## 运行函数（reference_security为运行时间的参考标的；传入的标的只做种类区分，因此传入'000300.XSHG'或'510300.XSHG'是一样的）
+      # 开盘前运行
+    if g.run_monthly == True:
+        run_monthly(before_market_open, monthday=1, time='09:30')
+          # 开盘时运行
+        run_monthly(market_open, monthday=1, time='09:30')
+    else:
+        run_daily(before_market_open, time='open')
+        run_daily(market_open, time='open')
+        
+    
+def set_params():
+    g.n = 3 #移动平均窗口
+    g.bulin_n = 25 #布林带数据长度
+    g.position = 0
+    g.stocks = '000300.XSHG'
+    g.bulin_upper_dev = 1.8 #布林带上限标准差倍数
+    g.bulin_lower_dev = 1.8
+    g.run_monthly = True
+    g.num_date = 90
+    g.reserve_ratio_delay = 120 #存款准备金率取之前数据的周期
+    g.weight = [1,1,2,1,1]  #'monetary','forex','credit','boom','inflation'
+    g.combine_weights = [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]  #'PMI','import_idx','primary_yoy','satisfaction_idx','confidence_idx'
+
+    g.blacklist = [
+        #'''
+        "002807.XSHE","600036.XSHG","600908.XSHG","601229.XSHG","002142.XSHE",
+        "600000.XSHG","600016.XSHG","601166.XSHG","600926.XSHG","601128.XSHG","002839.XSHE",
+        "600919.XSHG","600015.XSHG","601988.XSHG","601998.XSHG","601939.XSHG","601997.XSHG",
+        "601169.XSHG","000001.XSHE","601818.XSHG","601328.XSHG","601398.XSHG","601288.XSHG",
+        "601009.XSHG","603323.XSHG"
+        #'''
+        ] 
+
+## 开盘前运行函数
+def before_market_open(context):
+    g.statsDate = context.current_dt.date()
+    # 输出运行时间
+    log.info('函数运行时间(before_market_open)：'+str(context.current_dt.time()))
+    current_day = context.current_dt.day
+    current_month = context.current_dt.month
+    current_year = context.current_dt.year
+
+    month_list = get_last_month(current_year,current_month,24)
+    month_list.reverse()
+    
+    current_date = context.current_dt.date()
+    previous_date = context.previous_date
+    previous_date = datetime.datetime.strftime(previous_date,'%Y-%m-%d')
+    trade_days_one_month = get_trade_days(end_date=current_date,count=g.num_date)
+    trade_days_one_month = datetime_to_str(trade_days_one_month)
+    trade_days_one_month.pop() #将当天值去除
+    ts_data = change_to_tushare_date(trade_days_one_month)
+    
+    
+    m1_m2_position=get_m1_m2_position(month_list)
+
+    
+
+    pmi_position=  get_pmi_position(month_list)
+    produce_idx_positon=get_produce_idx_positon(month_list)
+    import_idx_positon=get_import_idx_positon(month_list)
+    delivery_time_idx_positon= get_delivery_time_idx_positon(month_list)
+    finished_produce_idx_positon=get_finished_produce_idx_positon(month_list)
+    purchase_quantity_idx_positon=get_purchase_quantity_idx_positon(month_list)
+    
+    
+    expand_yoy_position=get_expand_yoy_position(month_list)
+    secondary_yoy_positon=get_secondary_yoy_positon(month_list)
+    primary_yoy_positon=get_primary_yoy_positon(month_list)
+    
+    
+    collective_acc_positon=get_collective_acc_positon(month_list)
+    foreign_yoy_positon= get_foreign_yoy_positon(month_list)
+    growth_yoy_positon=get_growth_yoy_positon(month_list)
+    private_yoy_positon=get_private_yoy_positon(month_list)
+    joint_stock_yoy_positon=get_joint_stock_yoy_positon(month_list)
+        
+        
+    satisfaction_position=get_satisfaction_position(month_list)
+    confidence_position=get_confidence_position(month_list)
+    
+    ppi_cpi_position=get_ppi_cpi_position(month_list)
+
+    
+    combine_position = [
+        m1_m2_position
+       
+        ,ppi_cpi_position
+        
+        
+        ,pmi_position
+        ,produce_idx_positon
+        # ,import_idx_positon
+        ,delivery_time_idx_positon
+        # ,finished_produce_idx_positon
+        ,purchase_quantity_idx_positon
+        
+        ,expand_yoy_position
+        ,secondary_yoy_positon
+        ,primary_yoy_positon
+        
+        ,collective_acc_positon
+        ,foreign_yoy_positon
+        ,growth_yoy_positon
+        ,private_yoy_positon
+        ,joint_stock_yoy_positon
+    
+    
+        ,satisfaction_position
+        ,confidence_position]
+    
+    combine_position = np.array(combine_position).flatten()
+    combine_weights = np.array(g.combine_weights)
+    position = (combine_position * g.combine_weights).sum()
+    position = position/combine_weights.sum()
+    print(str(current_year)+"-"+str(current_month ))
+    print( combine_position )
+    if position > 0.45:
+        g.position = 1
+    elif position < 0.4:
+        g.position = 0
+    else:
+        g.position = 0.5
+    
+## 开盘时运行函数
+def market_open(context):
+    previous_date = context.previous_date
+    previous_date = datetime.datetime.strftime(previous_date,'%Y-%m-%d')
+    cash = context.portfolio.available_cash
+    all_cash = context.portfolio.total_value
+    '''
+    if g.position == 1:
+            log.info('开始下单')
+            order_value(g.stocks, cash)
+    else:
+        order_target(g.stocks, 0)
+    '''
+    #大盘止损，上月跌幅超5%则卖出
+    price = get_price(g.stocks,end_date=previous_date, fields=['close'],count=21)['close']
+    pct_change = price.pct_change(20).values[-1]
+    print(g.position)
+    if g.position == 1:
+        log.info('开始下单')
+    #    order_value(g.stocks, cash)
+        trade_func(context)
+    # 如果上一时间点价格低于五天平均价, 则空仓卖出
+    elif g.position == 0.5:
+    #    order_value(g.stocks, all_cash/2)
+         trade_func(context)
+    else:
+    #    order_target(g.stocks, 0)
+        for s in context.portfolio.positions.keys():
+            order_target(s, 0)
+    
+##################################工具函数###################################################
+
+def get_last_month(year,month,n):
+    l = []
+    j = 12
+    r = 0
+    for i in range(n):
+        m = month  - i -1
+        if m < 1:
+            j += 1
+            if j==13:
+                year -= 1
+                j = 1
+                r += 1
+            ml = month + 12*r - i - 1
+            if ml < 10:
+                date = str(year) + '-0' + str(ml)  
+            else:
+                date = str(year) + '-' + str(ml)
+            l.append(date)
+        else:
+            if m < 10:
+                date = str(year) + '-0' + str(m)  
+            else:
+                date = str(year) + '-' + str(m)
+            l.append(date)
+    return l
+
+def datetime_to_str(date_list):
+    l = []
+    for date in date_list:
+        d = datetime.datetime.strftime(date,'%Y-%m-%d')
+        l.append(d)
+    return l
+
+def change_to_tushare_date(date_list):
+    l = []
+    for date in date_list:
+        y = date[:4]
+        m = date[5:7]
+        d = date[8:10]
+        nd = y+m+d
+        l.append(nd)
+    return l
+
+
+#获取PMI数据
+def  get_PMI(month_list):
+    a = macro.MAC_MANUFACTURING_PMI
+    q = query(a.stat_month,a.pmi).filter(a.stat_month.in_(month_list))
+    pmi = macro.run_query(q)
+    return pmi
+
+
+
+def change_time_split(str,before="-",after="."):
+    str_list=str.split(before)
+    if int(str_list[1])<10:
+        str_list[1]=str_list[1][-1]
+    return after.join(str_list)
+
+
+################################来自聚宽平台的宏观数据########################
+
+
+    
+    
+def get_m1_m2_position(month_list):
+    mei = macro.MAC_MONEY_SUPPLY_MONTH
+    q = query(mei).filter(mei.stat_month.in_(month_list))
+    mac_economic = macro.run_query(q)
+    mac_economic = mac_economic.set_index('stat_month')
+    mac_economic = mac_economic.sort_index()
+    m1_m2yoy=mac_economic["m1_yoy"]-mac_economic["m2_yoy"]
+    m1_m2yoy_position =get_combine_positon(m1_m2yoy,delay=1,continus_n=2,rolling_n=2,long_n=13,short_n=4,how='dowm')
+    if len(m1_m2yoy_position.values)<=0:
+        m1_m2yoy_position=0.43
+    else:
+        m1_m2yoy_position = m1_m2yoy_position.values[-1]
+    return m1_m2yoy_position
+
+
+def get_ppi_cpi_position(month_list):
+    for i in range(0,len(month_list)):
+        month_list[i]=change_time_split(month_list[i],before="-",after=".")
+    ppi_cpi_df=g.ppi_cpi_df.loc[month_list]
+
+    ppi_cpi_df["position"]=ppi_cpi_df["ppi"]-ppi_cpi_df["cpi"]
+    ppi_cpi=ppi_cpi_df["position"]
+    ppi_cpi_position=  get_position_from_continus_increase(ppi_cpi,n=2,delay=1,how='dowm')
+    if len(ppi_cpi_position.values)<=0:
+        ppi_cpi_position=0.43
+    else:
+        ppi_cpi_position = ppi_cpi_position.values[-1]
+    return ppi_cpi_position
+    
+
+
+#制造业采购经理指数 
+def get_pmi_position(month_list):
+    mei = macro.MAC_MANUFACTURING_PMI
+    q = query(mei).filter(mei.stat_month.in_(month_list))
+    mac_economic = macro.run_query(q)
+    mac_economic = mac_economic.set_index('stat_month')
+    mac_economic = mac_economic.sort_index()
+    pmi = mac_economic['pmi']
+
+    pmi_position = get_combine_positon(pmi,delay=0,continus_n=2,rolling_n=2,long_n=12,short_n=4,how="up")
+    
+    if len(pmi_position.values)<=0:
+        pmi_position=0.43
+    else:
+        pmi_position = pmi_position.values[-1]
+    return pmi_position
+    
+    
+    
+
+#生产指数 
+def get_produce_idx_positon(month_list):
+    mei = macro.MAC_MANUFACTURING_PMI
+    q = query(mei).filter(mei.stat_month.in_(month_list))
+    mac_economic = macro.run_query(q)
+    mac_economic = mac_economic.set_index('stat_month')
+    mac_economic = mac_economic.sort_index()
+    produce_idx = mac_economic['produce_idx']
+    produce_idx_position = get_combine_positon(produce_idx,delay=2,continus_n=2,rolling_n=1,long_n=12,short_n=3,how="up")
+    if len(produce_idx_position.values)<=0:
+        produce_idx_position=0.43
+    else:
+        produce_idx_position = produce_idx_position.values[-1]
+    return produce_idx_position
+    
+#进口指数   
+def get_import_idx_positon(month_list):
+    mei = macro.MAC_MANUFACTURING_PMI
+    q = query(mei).filter(mei.stat_month.in_(month_list))
+    mac_economic = macro.run_query(q)
+    mac_economic = mac_economic.set_index('stat_month')
+    mac_economic = mac_economic.sort_index()
+    import_idx = mac_economic['import_idx']
+    import_idx_position = get_combine_positon(import_idx,delay=0,continus_n=2,rolling_n=2,long_n=14,short_n=4,how="up")
+    if len(import_idx_position.values)<=0:
+        import_idx_position=0.43
+    else:
+        import_idx_position = import_idx_position.values[-1]
+    return import_idx_position
+    
+#供应商配送时间指数
+def get_delivery_time_idx_positon(month_list):
+    mei = macro.MAC_MANUFACTURING_PMI
+    q = query(mei).filter(mei.stat_month.in_(month_list))
+    mac_economic = macro.run_query(q)
+    mac_economic = mac_economic.set_index('stat_month')
+    mac_economic = mac_economic.sort_index()
+    delivery_time_idx= mac_economic['delivery_time_idx']
+    delivery_time_idx_position = get_position_from_long_short_monving_average(delivery_time_idx,long_n=12,short_n=4,delay=3,how='dowm')
+    if len(delivery_time_idx_position.values)<=0:
+        delivery_time_idx_position=0.43
+    else:
+        delivery_time_idx_position = delivery_time_idx_position.values[-1]
+    return delivery_time_idx_position
+
+
+
+#产成品库存指数
+def get_finished_produce_idx_positon(month_list):
+    mei = macro.MAC_MANUFACTURING_PMI
+    q = query(mei).filter(mei.stat_month.in_(month_list))
+    mac_economic = macro.run_query(q)
+    mac_economic = mac_economic.set_index('stat_month')
+    mac_economic = mac_economic.sort_index()
+    finished_produce_idx= mac_economic['finished_produce_idx']
+    finished_produce_idx_position = get_combine_positon(finished_produce_idx,delay=1,continus_n=2,rolling_n=2,long_n=13,short_n=4,how="up")
+    if len(finished_produce_idx_position.values)<=0:
+        finished_produce_idx_position=0.43
+    else:
+        finished_produce_idx_position = finished_produce_idx_position.values[-1]
+    
+    return finished_produce_idx_position
+
+#采购量指数	
+def get_purchase_quantity_idx_positon(month_list):
+    mei = macro.MAC_MANUFACTURING_PMI
+    q = query(mei).filter(mei.stat_month.in_(month_list))
+    mac_economic = macro.run_query(q)
+    mac_economic = mac_economic.set_index('stat_month')
+    mac_economic = mac_economic.sort_index()
+    purchase_quantity_idx= mac_economic['purchase_quantity_idx']
+    purchase_quantity_idx_position = get_combine_positon(purchase_quantity_idx,delay=0,continus_n=2,rolling_n=2,long_n=12,short_n=3,how="up")
+    if len(purchase_quantity_idx_position.values)<=0:
+        purchase_quantity_idx_position=0.43
+    else:
+        purchase_quantity_idx_position = purchase_quantity_idx_position.values[-1]
+    
+    return purchase_quantity_idx_position
+
+
+
+
+
+
+
+#扩建固定资产投资完成额_累计增长数
+def get_expand_yoy_position(month_list):
+    mei = macro.MAC_FIXED_INVESTMENT
+    q = query(mei).filter(mei.stat_month.in_(month_list))
+    mac_economic = macro.run_query(q)
+    mac_economic = mac_economic.set_index('stat_month')
+    mac_economic = mac_economic.sort_index()
+    expand_yoy= mac_economic['expand_yoy']
+    expand_yoy_position = get_combine_positon(expand_yoy,delay=2,continus_n=2,rolling_n=1,long_n=12,short_n=3,how='dowm')
+    if len(expand_yoy_position.values)<=0:
+        expand_yoy_position=0.43
+    else:
+        expand_yoy_position = expand_yoy_position.values[-1]
+    
+    return expand_yoy_position
+    
+#第二产业固定资产投资完成额_累计增长数 
+def get_secondary_yoy_positon(month_list):
+    mei = macro.MAC_FIXED_INVESTMENT
+    q = query(mei).filter(mei.stat_month.in_(month_list))
+    mac_economic = macro.run_query(q)
+    mac_economic = mac_economic.set_index('stat_month')
+    mac_economic = mac_economic.sort_index()
+    secondary_yoy= mac_economic['secondary_yoy']
+    secondary_yoy_position =get_combine_positon(secondary_yoy,delay=0,continus_n=2,rolling_n=1,long_n=13,short_n=3,how='dowm')
+    
+    if len(secondary_yoy_position.values)<=0:
+        secondary_yoy_position=0.43
+    else:
+        secondary_yoy_position = secondary_yoy_position.values[-1]
+    
+    return secondary_yoy_position   
+    
+    
+#第一产业固定资产投资完成额_累计增长
+def get_primary_yoy_positon(month_list):
+    mei = macro.MAC_FIXED_INVESTMENT
+    q = query(mei).filter(mei.stat_month.in_(month_list))
+    mac_economic = macro.run_query(q)
+    mac_economic = mac_economic.set_index('stat_month')
+    mac_economic = mac_economic.sort_index()
+    primary_yoy= mac_economic['primary_yoy']
+    primary_yoy_position =   get_rolling_positon(primary_yoy,n=2,delay=1,how='up')
+    if len(primary_yoy_position.values)<=0:
+        primary_yoy_position=0.43
+    else:
+        primary_yoy_position = primary_yoy_position.values[-1]
+    
+    return primary_yoy_position 
+    
+    
+    
+    
+
+    
+
+def get_collective_acc_positon(month_list):
+    mei = macro.MAC_INDUSTRY_GROWTH
+    q = query(mei).filter(mei.stat_month.in_(month_list))
+    mac_economic = macro.run_query(q)
+    mac_economic = mac_economic.set_index('stat_month')
+    mac_economic = mac_economic.sort_index()
+    collective_acc= mac_economic['collective_acc']
+    collective_acc_position = get_position_from_long_short_monving_average(collective_acc,long_n=12,short_n=3,delay=0,how='up')
+    if len(collective_acc_position.values)<=0:
+        collective_acc_position=0.43
+    else:
+        collective_acc_position = collective_acc_position.values[-1]
+    
+    return collective_acc_position 
+
+
+
+def get_foreign_yoy_positon(month_list):
+    mei = macro.MAC_INDUSTRY_GROWTH
+    q = query(mei).filter(mei.stat_month.in_(month_list))
+    mac_economic = macro.run_query(q)
+    mac_economic = mac_economic.set_index('stat_month')
+    mac_economic = mac_economic.sort_index()
+    foreign_yoy= mac_economic['foreign_yoy']
+    foreign_yoy_position = get_position_from_continus_increase(foreign_yoy,n=2,delay=2,how='up')
+    if len(foreign_yoy_position.values)<=0:
+        foreign_yoy_position=0.43
+    else:
+        foreign_yoy_position = foreign_yoy_position.values[-1]
+    
+    return foreign_yoy_position 
+    
+
+def get_growth_yoy_positon(month_list):
+    mei = macro.MAC_INDUSTRY_GROWTH
+    q = query(mei).filter(mei.stat_month.in_(month_list))
+    mac_economic = macro.run_query(q)
+    mac_economic = mac_economic.set_index('stat_month')
+    mac_economic = mac_economic.sort_index()
+    growth_yoy= mac_economic['growth_yoy']
+    growth_yoy_position = get_combine_positon(growth_yoy,delay=0,continus_n=2,rolling_n=1,long_n=12,short_n=4,how='up')
+    if len(growth_yoy_position.values)<=0:
+        growth_yoy_position=0.43
+    else:
+        growth_yoy_position = growth_yoy_position.values[-1]
+    
+    return growth_yoy_position 
+    
+
+def get_private_yoy_positon(month_list):
+    mei = macro.MAC_INDUSTRY_GROWTH
+    q = query(mei).filter(mei.stat_month.in_(month_list))
+    mac_economic = macro.run_query(q)
+    mac_economic = mac_economic.set_index('stat_month')
+    mac_economic = mac_economic.sort_index()
+    private_yoy= mac_economic['private_yoy']
+    private_yoy_position = get_combine_positon(private_yoy,delay=2,continus_n=2,rolling_n=3,long_n=12,short_n=3,how='up')
+    if len(private_yoy_position.values)<=0:
+        private_yoy_position=0.43
+    else:
+        private_yoy_position = private_yoy_position.values[-1]
+    
+    return private_yoy_position 
+    
+    
+    
+#
+def get_joint_stock_yoy_positon(month_list):
+    mei = macro.MAC_INDUSTRY_GROWTH
+    q = query(mei).filter(mei.stat_month.in_(month_list))
+    mac_economic = macro.run_query(q)
+    mac_economic = mac_economic.set_index('stat_month')
+    mac_economic = mac_economic.sort_index()
+    joint_stock_yoy= mac_economic['joint_stock_yoy']
+    joint_stock_yoy_position = get_rolling_positon(joint_stock_yoy,n=1,delay=0,how='up')
+    if len(joint_stock_yoy_position.values)<=0:
+        joint_stock_yoy_position=0.43
+    else:
+        joint_stock_yoy_position = joint_stock_yoy_position.values[-1]
+    
+    return joint_stock_yoy_position 
+    
+
+
+
+
+
+#消费者预期指数  satisfaction_idx  
+def get_satisfaction_position(month_list):
+    mei = macro.MAC_CONSUMER_BOOM_IDX
+    q = query(mei).filter(mei.stat_month.in_(month_list))
+    mac_economic = macro.run_query(q)
+    mac_economic = mac_economic.set_index('stat_month')
+    mac_economic = mac_economic.sort_index()
+    satisfaction_idx = mac_economic['satisfaction_idx']
+    satisfaction_position =  get_combine_positon(satisfaction_idx,delay=1,continus_n=2,rolling_n=1,long_n=13,short_n=3,how='dowm')
+    if len(satisfaction_position.values)<=0:
+        satisfaction_position=0.43
+    else:
+        satisfaction_position = satisfaction_position.values[-1] 
+    
+    return satisfaction_position
+
+#消费者信心指数 confidence_idx 
+def get_confidence_position(month_list):
+    mei = macro.MAC_CONSUMER_BOOM_IDX
+    q = query(mei).filter(mei.stat_month.in_(month_list))
+    mac_economic = macro.run_query(q)
+    mac_economic = mac_economic.set_index('stat_month')
+    mac_economic = mac_economic.sort_index()
+    confidence_idx = mac_economic['confidence_idx']
+    confidence_position = get_combine_positon(confidence_idx,delay=1,continus_n=2,rolling_n=3,long_n=13,short_n=3,how='dowm')
+    if len(confidence_position.values)<=0:
+        confidence_position=0.43
+    else:
+        confidence_position = confidence_position.values[-1] 
+    
+    return confidence_position
+
+
+
+
+
+
+
+
+################################################
+def bbands_select_time(data,model='up'):
+    col = data.columns[0]
+    upperband,middleband,lowerband = (tl.BBANDS(data[col].values, timeperiod=g.bulin_n, nbdevup=g.bulin_upper_dev, nbdevdn=g.bulin_lower_dev))
+
+    data['BBAND_upper']=upperband
+    data['BBAND_middle']=middleband
+    data['BBAND_lower']=lowerband
+    pre_position = 0
+    data['position'] = 0
+    if model == 'upper':
+        for date in data.index:
+            if data.loc[date,col]<data.loc[date,'BBAND_middle']:
+                data.loc[date,'position']=0
+            elif data.loc[date,col]>data.loc[date,'BBAND_upper']:
+                data.loc[date,'position']=1.0
+            else:
+                data.loc[date,'position']=pre_position
+            pre_position=data.loc[date,'position']
+    elif model == 'lower':
+        for date in data.index:
+            if data.loc[date,col]>data.loc[date,'BBAND_middle']:
+                data.loc[date,'position']=0
+            elif data.loc[date,col]<data.loc[date,'BBAND_lower']:
+                data.loc[date,'position']=1.0
+            else:
+                data.loc[date,'position']=pre_position
+            pre_position=data.loc[date,'position']
+    if g.run_monthly == True:
+        position = data['position'].values[-20:].mean()
+    else:
+        position = data['position'].values[-1]
+    #print(data.tail())
+    return position
+    
+def get_position_from_continus_increase(data,n=2,delay=2,how='up'):
+    '''
+    data:dataframe or series,输入数据,必须是一列
+    n:连续n次上涨或下跌
+    how:默认up，连续上涨n天position标记为1
+    delay:取决于宏观数据发布时间，一般宏观数据都是本月中旬发布上月数据，每月初能拿到的最近数据为2月前
+    '''
+    index = list(data.index)
+    length = len(index)
+    l = []
+    for i in range(n,length):
+        if how == 'up':
+            counter = 0
+            for j in range(i-n,i):
+                if np.float32(data.loc[index[j]])< np.float32(data.loc[index[j+1]]):
+                   counter += 1
+            if counter == n:
+                position = 1
+                l.append(position)
+            else:
+                position = 0
+                l.append(position)
+        else:
+            counter = 0
+            for j in range(i-n,i):
+                if np.float32(data.loc[index[j]]) > np.float32(data.loc[index[j+1]]):
+                    counter += 1
+            if counter == n:
+                position = 1
+                l.append(position)
+            else:
+                position = 0
+                l.append(position)
+    res = pd.DataFrame(l,columns=['position'],index=index[n:])
+    res = res.shift(delay).dropna()
+    return res
+
+def get_position_from_long_short_monving_average(data,long_n=12,short_n=3,delay=2,how='up'):
+    '''
+    data:dataframe or series,输入数据,必须是一列
+    long_n:移动平均长期线计算窗口
+    short_n:移动平均短期线窗口
+    n:连续n次上涨或下跌
+    how:默认up，连续上涨n天position标记为1
+    delay:取决于宏观数据发布时间，一般宏观数据都是本月中旬发布上月数据，每月初能拿到的最近数据为2月前
+    '''    
+    long_ma = data.rolling(long_n).mean()
+    short_ma = data.rolling(short_n).mean()
+    diff = short_ma -  long_ma
+    diff[diff>0] = 1
+    diff[diff<=0] = 0
+    if isinstance(diff,pd.Series):
+        diff = diff.to_frame()
+        diff.columns = ['position']
+    res = diff.shift(delay).dropna()
+    return res
+
+
+def get_rolling_positon(data,n=3,delay=2,how='up'):
+    '''
+    data:dataframe or series,输入数据,必须是一列
+    n:移动平均窗口大小
+    delay:取决于宏观数据发布时间，一般宏观数据都是本月中旬发布上月数据，每月初能拿到的最近数据为2月前
+    '''
+    if isinstance(data,pd.Series):
+        data = data.to_frame()
+    if how == 'up':
+        position = (data.rolling(n).mean() > data.rolling(n).mean().shift(1))*1.0
+    else:
+        position = (data.rolling(n).mean() < data.rolling(n).mean().shift(1))*1.0
+    if isinstance(position,pd.Series):
+        position = position.to_frame()
+    position.columns = ['position']
+    position = position.shift(delay).dropna()
+    return position
+
+
+def get_combine_positon(t,delay=3,continus_n=2,rolling_n=3,long_n=12,short_n=3,how='up'):
+    t = get_float(t)
+                            
+    p_continus_increase = get_position_from_continus_increase(t,n=continus_n,delay=delay,how=how)
+    p_rolling = get_rolling_positon(t,n=rolling_n,delay=delay,how=how)
+    p_lsma = get_position_from_long_short_monving_average(t,long_n=long_n,short_n=short_n,delay=delay,how=how)
+    p = pd.concat([p_lsma,p_rolling,p_continus_increase],axis=1).dropna()
+    index = p.index
+    p_lsma = p_lsma.loc[index]
+    p_rolling = p_rolling.loc[index]
+    p_continus_increase = p_continus_increase.loc[index]
+    p_all = (p_lsma + p_rolling + p_continus_increase) / 3.0
+    p_all[p_all > 0.5] = 1
+    p_all[p_all<0.5] = 0
+    return p_all
+
+def get_float(data):
+    '''
+    将dataframe中的str类型转换成float
+    data:dataframe
+    '''
+    if isinstance(data,pd.Series):
+        df = data.apply(lambda x:float32(x))
+    else:
+        values = data.values
+        index = data.index
+        columns = data.columns
+        l = []
+        for ind in range(len(index)):
+            ind_list = []
+            for col in range(len(columns)):
+                f = float(values[ind][col])
+                ind_list.append(f)
+            l.append(ind_list)
+        df = pd.DataFrame(l, index=index, columns=columns)
+    return df
+    
+    
+#策略选股买卖部分    
+def trade_func(context):
+    #获取股票池
+    df = get_fundamentals(query(valuation.code,valuation.market_cap,valuation.pb_ratio,indicator.roe))
+    #进行pb,roe大于0筛选
+    #进行pb,roe大于0筛选
+    df = df[(df['roe']>0) & (df['pb_ratio']>0)].sort_values('pb_ratio')
+    #以股票名词作为index
+    df.index = df['code'].values
+    #取roe倒数
+    df['1/roe'] = 1/df['roe']
+    #获取综合得分
+    df['point'] = df[['pb_ratio','1/roe']].rank().T.apply(f_sum)
+    df = df.sort_values('point')[:g.stock_num*10]
+    stock_list = df.index
+    positions_list = context.portfolio.positions.keys()
+    stock_list = unpaused(context,stock_list,positions_list)
+    stock_list = remove_st(context,stock_list, g.statsDate)
+    ## 过滤正在涨停的股票,不过滤持仓股
+    stock_list = remove_limit_up(context, stock_list, positions_list) 
+    pool = []
+    for stock in stock_list:
+        if stock not in g.blacklist:
+            pool.append(stock)    
+    pool = pool[:g.stock_num]
+    log.info('总共选出%s只股票'%len(pool))
+    if len(pool)>0:
+        #得到每只股票应该分配的资金
+        cash = context.portfolio.total_value/len(pool)
+    # 将不在股票池中的股票卖出
+    sell_list = set(positions_list) - set(pool)
+    for stock in sell_list:
+        order_target_value(stock, 0)    
+    
+    #买入股票
+    for s in pool:
+        order_target_value(s,cash)
+        
+#打分工具
+def f_sum(x):
+    return sum(x)
+
+## 收盘后运行函数  
+def after_market_close(context):
+    #得到当天所有成交记录
+    trades = get_trades()
+    for _trade in trades.values():
+        log.info('成交记录：'+str(_trade))
+    #打印账户总资产
+    log.info('今日账户总资产：%s'%round(context.portfolio.total_value,2))
+    #log.info('##############################################################')
+    # 计算当前仓位
+    record(P=(100-math.ceil(context.portfolio.available_cash / context.portfolio.total_value * 100)))
+# 剔除上市时间较短的产品
+def fun_delNewShare(context, equity, deltaday):
+    deltaDate = context.current_dt.date() - dt.timedelta(deltaday)
+
+    tmpList = []
+    for stock in equity:
+        if get_security_info(stock).start_date < deltaDate:
+            tmpList.append(stock)
+
+    return tmpList
+
+def unpaused(context,stock_list, positions_list):
+    current_data = get_current_data()
+    tmpList = []
+    for stock in stock_list:
+        if not current_data[stock].paused or stock in positions_list:
+            tmpList.append(stock)
+    return tmpList
+
+def remove_st(context, stock_list, statsDate):
+    current_data = get_current_data()
+    return [s for s in stock_list if not current_data[s].is_st]
+
+# 剔除涨停板的股票（如果没有持有的话）
+def remove_limit_up(context, stock_list, positions_list):
+    h = history(1, '1m', 'close', stock_list, df=False, skip_paused=False, fq='pre')
+    h2 = history(1, '1m', 'high_limit', stock_list, df=False, skip_paused=False, fq='pre')
+    tmpList = []
+    for stock in stock_list:
+        if h[stock][0] < h2[stock][0] or stock in positions_list:
+#                if buyOrSellCheck(context, stock,3,1.4):
+                tmpList.append(stock)
+    return tmpList

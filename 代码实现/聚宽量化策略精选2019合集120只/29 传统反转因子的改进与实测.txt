@@ -1,0 +1,114 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 本策略请选择 python 2 下回测
+
+# 导入函数库
+import pandas as pd
+from jqdata import*
+import numpy as np
+
+# 初始化函数，设定基准等等
+def initialize(context):
+    params_set()
+    backset(context)
+    
+#参数设置  
+def params_set():
+    g.stock_pool = None
+    g.trade_day_list = list(get_all_trade_days())
+    g.group = 1
+    g.if_trade = True
+    g.trade_clock = 0
+    g.fre = 10
+    g.backwindow = 22
+#回测设置
+def backset(context):
+    # 设定沪深300作为基准
+    set_benchmark('000906.XSHG')
+    # 开启动态复权模式(真实价格)
+    set_option('use_real_price', True)
+    ### 股票相关设定 ###
+    # 股票类每笔交易时的手续费是：买入时佣金万分之三，卖出时佣金万分之三加千分之一印花税, 每笔交易佣金最低扣5块钱
+    set_order_cost(OrderCost(close_tax=0.001, open_commission=0.0003, close_commission=0.0003, min_commission=5), type='stock')
+    # 设置日志级别为info
+    log.set_level('order', 'info')
+      # 开盘前运行
+    run_daily(before_market_open, time='before_open', reference_security='000906.XSHG')
+      # 开盘时运行
+    run_daily(market_open, time = 'every_bar')
+      
+## 开盘前运行函数
+def before_market_open(context):
+    #股票池选取：中证800
+    g.stock_pool = get_index_stocks('000906.XSHG', date=context.current_dt.date())
+
+
+    
+#生成持仓列表
+def creat_hold_list(context):
+    rate_df = revers_factor_get(context)
+    buy_list = rate_df.index[(g.group-1)*20:g.group*20-1]
+    print(len(buy_list))
+    return buy_list
+
+
+#每日开盘
+def market_open(context):
+    g.trade_clock += 1
+    if g.trade_clock % g.fre == 0:
+        g.if_trade = True
+    else:
+        pass
+    if g.if_trade:
+        Trade(context)
+        g.if_trade = False
+    else:
+        pass
+        
+
+#交易规则
+def Trade(context):
+    hold_list = get_buy_list(context)
+    hold_position = context.portfolio.positions.keys()
+    for current_hold in hold_position:
+        if current_hold not in hold_list:
+            order_target(current_hold, 0)
+        else:
+            pass
+    hold_position = context.portfolio.positions.keys()
+    for stock in hold_list:
+        if len(hold_list) != 0:
+            if stock not in hold_position and len(hold_list) > len(hold_position):
+                order_value(stock, context.portfolio.available_cash / (len(hold_list) - len(hold_position)))
+            elif len(hold_position) == 0:
+                order_value(stock, context.portfolio.available_cash / len(hold_list))
+            else:
+                pass
+        else:
+            pass
+ 
+ 
+ 
+def get_buy_list(context):
+    today_index = g.trade_day_list.index(context.current_dt.date())
+    past_days_list =  g.trade_day_list[today_index-g.backwindow:today_index]
+    Array_price = np.zeros((g.backwindow,len(g.stock_pool)))
+    step = 0
+    for date in past_days_list:
+        time1 = str(date) + ' 10:30:00'
+        time2 = str(date) + ' 15:00:00'
+        price1 = array(get_price(g.stock_pool, time1, time1, '1m', ['close'])['close'])
+        price2 = array(get_price(g.stock_pool, time2, time2, '1m', ['close'])['close'])
+        daliy_rate = price2 / price1
+        Array_price[step] = daliy_rate
+        step += 1
+    df_rate = pd.DataFrame(Array_price,index = past_days_list,columns = g.stock_pool).prod(axis = 0)
+    df_rank_index = pd.DataFrame()
+    df_rank_index['rate'] = df_rate
+    df_rank_index = df_rank_index.sort_index(by = 'rate')
+    df_rank_index = df_rank_index.index
+    buy_list = df_rank_index[(g.group-1)*0.1*len(g.stock_pool)*0.25:g.group*0.1*len(g.stock_pool)*0.25]
+    return buy_list
+     
+     
+     

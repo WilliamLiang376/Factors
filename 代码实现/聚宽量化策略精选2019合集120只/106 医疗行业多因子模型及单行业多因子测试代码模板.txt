@@ -1,0 +1,628 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/16766
+# 标题：医疗行业多因子模型及单行业多因子测试代码模板
+# 作者：Alfred_YY
+# 回测需要原文中的csv文件
+
+# 导入函数库
+import time
+import math
+from datetime import datetime,timedelta
+import jqdata
+from jqdata import finance
+import numpy as np
+import pandas as pd
+import math
+from statsmodels import regression
+import statsmodels.api as sm
+from jqfactor import get_factor_values
+import datetime
+from scipy import stats
+from jqfactor import winsorize_med
+from jqfactor import neutralize
+from jqfactor import standardlize
+from six import StringIO
+
+'''
+====================================================
+配套函数设置区
+====================================================
+'''
+def get_all_data():
+    csv = read_file('医疗IC.csv')
+    frame = pd.read_csv(StringIO(csv))
+    frame.index = frame['code']
+    index = g.factor[:]
+    index.extend(['code','date','pct'])
+    frame = frame.loc[:,index].copy()
+    g.pool = list(set(list(frame['code'])))
+    g.trade_day = list(set(list(frame['date'])))
+    g.trade_day.sort()
+    #frame.set_index(["date","code"],append=False,drop=True,inplace=True)
+    g.factor_data = frame
+
+#获取股票池
+def get_stock(industry,date):
+    #这里可以设定选择的行业板块
+    stock_list = get_industry_stocks(industry_code = industry,date=date)
+    return stock_list
+
+def tradedays_before(date,count):
+    date = get_price('000001.XSHG',end_date=date,count=count+1).index[0]
+    return date
+
+#获取时间为date的全部因子数据
+def get_factor_data(stock,date):
+    data_1=pd.DataFrame(index=stock)
+    q = query(valuation,balance,cash_flow,income,indicator).filter(valuation.code.in_(stock))
+    df = get_fundamentals(q, date)
+    df['market_cap']=df['market_cap']*100000000
+    factor_data_1=get_factor_values(stock,['roe_ttm','roa_ttm','total_asset_turnover_rate',\
+                               'net_operate_cash_flow_ttm','net_profit_ttm','net_profit_ratio',\
+                              'cash_to_current_liability','current_ratio',\
+                             'gross_income_ratio','non_recurring_gain_loss',\
+                            'operating_revenue_ttm','net_profit_growth_rate',\
+                            'total_asset_growth_rate','net_asset_growth_rate',\
+                            'long_debt_to_working_capital_ratio','net_operate_cash_flow_to_net_debt',\
+                            'net_operate_cash_flow_to_total_liability'],end_date=date,count=1)
+    factor=pd.DataFrame(index=stock)
+    for i in factor_data_1.keys():
+        factor[i]=factor_data_1[i].iloc[0,:]
+    df.index = df['code']
+    data_1['code'] = df['code']
+    del df['code'],df['id']
+    #合并得大表
+    df=pd.concat([df,factor],axis=1)
+    #PE值
+    data_1['pe_ratio']=df['pe_ratio']
+    #PB值
+    data_1['pb_ratio']=df['pb_ratio']
+    #总市值
+    data_1['size']=df['market_cap']
+    #总市值取对数
+    data_1['size_lg']=np.log(df['market_cap'])
+    #净利润(TTM)/总市值
+    data_1['EP']=df['net_profit_ttm']/df['market_cap']
+    #净资产/总市值
+    data_1['BP']=1/df['pb_ratio']
+    #营业收入(TTM)/总市值
+    data_1['SP']=1/df['ps_ratio']
+    #净现金流(TTM)/总市值
+    data_1['NCFP']=1/df['pcf_ratio']
+    #经营性现金流(TTM)/总市值
+    data_1['OCFP']=df['net_operate_cash_flow_ttm']/df['market_cap']
+    #经营性现金流量净额/净收益
+    data_1['ocf_to_operating_profit']=df['ocf_to_operating_profit']
+    #经营性现金流量净额/营业收入
+    data_1['ocf_to_revenue']=df['ocf_to_revenue']
+    #净利润同比增长率
+    data_1['net_g'] = df['net_profit_growth_rate']
+    #净利润(TTM)同比增长率/PE_TTM
+    data_1['G/PE']=df['net_profit_growth_rate']/df['pe_ratio']
+    #ROE_ttm
+    data_1['roe_ttm']=df['roe_ttm']
+    #ROE_YTD
+    data_1['roe_q']=df['roe']
+    #ROA_ttm
+    data_1['roa_ttm']=df['roa_ttm']
+    #ROA_YTD
+    data_1['roa_q']=df['roa']
+    #净利率
+    data_1['netprofitratio_ttm'] = df['net_profit_ratio']
+    #毛利率TTM
+    data_1['grossprofitmargin_ttm']=df['gross_income_ratio']
+    #毛利率YTD
+    data_1['grossprofitmargin_q']=df['gross_profit_margin']
+    #销售净利率TTM
+    data_1['net_profit_margin']=df['net_profit_margin']
+    #净利润同比增长率
+    data_1['inc_net_profit_year_on_year']=df['inc_net_profit_year_on_year']
+    #营业收入同比增长率
+    data_1['inc_revenue_year_on_year']=df['inc_revenue_year_on_year']
+    #营业利润/营业总收入
+    data_1['operation_profit_to_total_revenue']=df['operation_profit_to_total_revenue']
+    #扣除非经常性损益后净利润率YTD
+    data_1['profitmargin_q']=df['adjusted_profit']/df['operating_revenue']
+    #资产周转率TTM
+    data_1['assetturnover_ttm']=df['total_asset_turnover_rate']
+    #总资产周转率YTD 营业收入/总资产
+    data_1['assetturnover_q']=df['operating_revenue']/df['total_assets']
+    #经营性现金流/净利润TTM
+    data_1['operationcashflowratio_ttm']=df['net_operate_cash_flow_ttm']/df['net_profit_ttm']
+    #经营性现金流/净利润YTD
+    data_1['operationcashflowratio_q']=df['net_operate_cash_flow']/df['net_profit']
+    #经营性现金流/营业收入
+    data_1['operationcashflow_revenue']=df['net_operate_cash_flow_ttm']/df['operating_revenue']
+    #净资产
+    df['net_assets']=df['total_assets']-df['total_liability']
+    #总资产/净资产
+    data_1['financial_leverage']=df['total_assets']/df['net_assets']
+    #非流动负债/净资产
+    data_1['debtequityratio']=df['total_non_current_liability']/df['net_assets']
+    #现金比率=(货币资金+有价证券)÷流动负债
+    data_1['cashratio']=df['cash_to_current_liability']
+    #流动比率=流动资产/流动负债*100%
+    data_1['currentratio']=df['current_ratio']
+    #现金流动负债率
+    data_1['net_operate_cash_flow_to_net_debt']=df['net_operate_cash_flow_to_net_debt']
+    #现金负债率
+    data_1['net_operate_cash_flow_to_total_liability']=df['net_operate_cash_flow_to_total_liability']
+    #长期负债与营运现金比率
+    data_1['long_debt_to_working_capital_ratio']=df['long_debt_to_working_capital_ratio']
+    #总资产增长率
+    data_1['total_asset_growth_rate']=df['total_asset_growth_rate']
+    #净资产增长率
+    data_1['net_asset_growth_rate']=df['net_asset_growth_rate']
+    #总市值取对数
+    data_1['ln_capital']=np.log(df['market_cap'])
+    #TTM所需时间
+    his_date = [pd.to_datetime(date) - datetime.timedelta(90*i) for i in range(0, 4)]
+    tmp = pd.DataFrame()
+    tmp['code']=list(stock)
+    for i in his_date:
+        tmp_adjusted_dividend = get_fundamentals(query(indicator.code, indicator.adjusted_profit, \
+                                                     cash_flow.dividend_interest_payment).
+                                               filter(indicator.code.in_(stock)), date = i)
+        tmp=pd.merge(tmp,tmp_adjusted_dividend,how='outer',on='code')
+
+        tmp=tmp.rename(columns={'adjusted_profit':'adjusted_profit'+str(i.month), \
+                                'dividend_interest_payment':'dividend_interest_payment'+str(i.month)})
+    tmp=tmp.set_index('code')
+    tmp_columns=tmp.columns.values.tolist()
+    tmp_adjusted=sum(tmp[[i for i in tmp_columns if 'adjusted_profit'in i ]],1)
+    tmp_dividend=sum(tmp[[i for i in tmp_columns if 'dividend_interest_payment'in i ]],1)
+    #扣除非经常性损益后净利润(TTM)/总市值
+    data_1['EPcut']=tmp_adjusted/df['market_cap']
+    #近12个月现金红利(按除息日计)/总市值
+    data_1['DP']=tmp_dividend/df['market_cap']
+    #扣除非经常性损益后净利润率TTM
+    data_1['profitmargin_ttm']=tmp_adjusted/df['operating_revenue_ttm']
+    #营业收入(YTD)同比增长率
+    #_x现在 _y前一年
+    his_date = pd.to_datetime(date) - datetime.timedelta(365)
+    name=['operating_revenue','net_profit','net_operate_cash_flow','roe']
+    temp_data_1=df[name]
+    his_temp_data_1 = get_fundamentals(query(valuation.code, income.operating_revenue,income.net_profit,\
+                                            cash_flow.net_operate_cash_flow,indicator.roe).
+                                      filter(valuation.code.in_(stock)), date = his_date)
+    his_temp_data_1=his_temp_data_1.set_index('code')
+    #重命名 his_temp_data_1 last_year
+    for i in name:
+        his_temp_data_1=his_temp_data_1.rename(columns={i:i+'last_year'})
+
+    temp_data_1 =pd.concat([temp_data_1,his_temp_data_1],axis=1)
+    #营业收入(YTD)同比增长率
+    data_1['sales_g_q']=temp_data_1['operating_revenue']/temp_data_1['operating_revenuelast_year']-1
+    #净利润(YTD)同比增长率
+    data_1['profit_g_q']=temp_data_1['net_profit']/temp_data_1['net_profitlast_year']-1
+    #经营性现金流(YTD)同比增长率
+    data_1['ocf_g_q']=temp_data_1['net_operate_cash_flow']/temp_data_1['net_operate_cash_flowlast_year']-1
+    #ROE(YTD)同比增长率
+    data_1['roe_g_q']=temp_data_1['roe']/temp_data_1['roelast_year']-1
+    
+    #计算beta部分
+    #辅助线性回归的函数
+    def linreg(X,Y,columns=3):
+        X=sm.add_constant(array(X))
+        Y=array(Y)
+        if len(Y)>1:
+            results = regression.linear_model.OLS(Y, X).fit()
+            return results.params
+        else:
+            return [float("nan")]*(columns+1)
+    #个股60个月收益与上证综指回归的截距项与BETA
+    stock_close=get_price(list(stock), count = 12*20+1, end_date=date, frequency='daily', fields=['close'])['close']
+    SZ_close=get_price('000001.XSHG', count = 12*20+1, end_date=date, frequency='daily', fields=['close'])['close']
+    stock_pchg=stock_close.pct_change().iloc[1:]
+    SZ_pchg=SZ_close.pct_change().iloc[1:]
+    beta=[]
+    stockalpha=[]
+    for i in stock:
+        temp_beta, temp_stockalpha = stats.linregress(SZ_pchg, stock_pchg[i])[:2]
+        beta.append(temp_beta)
+        stockalpha.append(temp_stockalpha)
+    #此处alpha beta为list
+    #data_1['alpha']=stockalpha
+    data_1['beta']=beta
+    
+    #反转
+    data_1['reverse_1m']=stock_close.iloc[-21]/stock_close.iloc[-1]-1
+    data_1['reverse_3m']=stock_close.iloc[-63]/stock_close.iloc[-1]-1
+    #波动率（一个月、三个月标准差）
+    data_1['std_1m']=stock_close[-20:].std()
+    data_1['std_3m']=stock_close[-60:].std()
+    #换手率
+    #tradedays_1m = get_tradeday_list(start=date,end=date,frequency='day',count=21)#最近一个月交易日
+    tradedays_3m = get_tradeday_list(start=date,end=date,frequency='day',count=63)#最近一个月交易日
+    data_1_turnover_ratio=pd.DataFrame()
+    data_1_turnover_ratio['code']=list(stock)
+    for i in tradedays_3m:
+        q = query(valuation.code,valuation.turnover_ratio).filter(valuation.code.in_(stock))
+        temp = get_fundamentals(q, i)
+        data_1_turnover_ratio=pd.merge(data_1_turnover_ratio, temp,how='left',on='code')
+        data_1_turnover_ratio=data_1_turnover_ratio.rename(columns={'turnover_ratio':i})
+    data_1['turn_3m']= (data_1_turnover_ratio.set_index('code').T).mean()
+    data_1['turn_1m']= (data_1_turnover_ratio.set_index('code').T)[-21:].mean()    
+    return data_1
+
+def get_key (dict, value):
+    return [k for k, v in dict.items() if v == value]
+
+def replace_nan_indu(factor_data,stockList,industry_code,date):
+    #把nan用行业平均值代替，依然会有nan，此时用所有股票平均值代替
+    i_Constituent_Stocks={}
+    if isinstance(factor_data,pd.DataFrame):
+        data_temp=pd.DataFrame(index=industry_code,columns=factor_data.columns)
+        for i in industry_code:
+            temp = get_industry_stocks(i, date)
+            i_Constituent_Stocks[i] = list(set(temp).intersection(set(stockList)))
+            data_temp.loc[i]=mean(factor_data.loc[i_Constituent_Stocks[i],:])
+        for factor in data_temp.columns:
+            #行业缺失值用所有行业平均值代替
+            null_industry=list(data_temp.loc[pd.isnull(data_temp[factor]),factor].keys())
+            for i in null_industry:
+                data_temp.loc[i,factor]=mean(data_temp[factor])
+            null_stock=list(factor_data.loc[pd.isnull(factor_data[factor]),factor].keys())
+            for i in null_stock:
+                industry=get_key(i_Constituent_Stocks,i)
+                if industry:
+                    factor_data.loc[i,factor]=data_temp.loc[industry[0],factor] 
+                else:
+                    factor_data.loc[i,factor]=mean(factor_data[factor])
+    return factor_data
+
+#去空值，用行业平均值代替
+def delete_nan(factor_list,pl_pro,key=1):
+    if key==1:
+        mean_list = {}
+        for i in range(1,len(factor_list)):
+            temp = pl_pro[factor_list[i]].as_matrix()
+            new = temp.astype(np.float64)
+            mean = np.nanmean(new)
+            mean_list[i]=mean
+        for i in range(1,len(factor_list)):
+            t=0
+            while t<len(pl_pro[factor_list[i]].columns):
+                if pl_pro[factor_list[i]].iloc[:,t].isnull().all()==True:
+                    pl_pro.drop([pl_pro[factor_list[i]].columns[t]],axis=2,inplace=True)
+                else:
+                    t = t+1
+        pl_new = pd.Panel(items=pl_pro.items,major_axis=pl_pro.major_axis,minor_axis=pl_pro.minor_axis)
+        pl_new[factor_list[0]] = pl_pro[factor_list[0]]
+        for i in range(1,len(factor_list)):
+            #不计算第一列和最后一列的数据，避免共线性问题
+            temp = pl_pro.iloc[i,:,:]
+            new = pd.DataFrame(index=temp.index,columns=temp.columns)
+            new.iloc[0,:] = temp.iloc[0,:]
+            for j in range(1,len(pl_pro.iloc[i,:,:].index)-1):
+                new.iloc[j,:] = temp.iloc[j,:].fillna(mean_list[i])
+            new.iloc[-1,:] = temp.iloc[-1,:]
+            pl_new[factor_list[i]] = new
+        return pl_new
+    else:
+        mean_list = {}
+        for i in range(1,len(factor_list)):
+            temp = pl_pro[factor_list[i]].as_matrix()
+            new = temp.astype(np.float64)
+            mean = np.nanmean(new)
+            mean_list[i]=mean
+        for i in range(1,len(factor_list)):
+            t=0
+            while t<len(pl_pro[factor_list[i]].columns):
+                if pl_pro[factor_list[i]].iloc[:,t].isnull().all()==True:
+                    pl_pro.drop([pl_pro[factor_list[i]].columns[t]],axis=2,inplace=True)
+                else:
+                    t = t+1
+        pl_new = pd.Panel(items=pl_pro.items,major_axis=pl_pro.major_axis,minor_axis=pl_pro.minor_axis)
+        pl_new[factor_list[0]] = pl_pro[factor_list[0]]
+        for i in range(1,len(factor_list)):
+            #不计算第一列和最后一列的数据，避免共线性问题
+            temp = pl_pro.iloc[i,:,:]
+            new = pd.DataFrame(index=temp.index,columns=temp.columns)
+            new.iloc[0,:] = temp.iloc[0,:]
+            for j in range(0,len(pl_pro.iloc[i,:,:].index)):
+                new.iloc[j,:] = temp.iloc[j,:].fillna(mean_list[i])
+            new.iloc[-1,:] = temp.iloc[-1,:]
+            pl_new[factor_list[i]] = new
+        return pl_new
+
+#去极值函数
+#mad中位数去极值法
+def filter_extreme_MAD(series,n): #MAD: 中位数去极值 
+    median = series.quantile(0.5)
+    new_median = ((series - median).abs()).quantile(0.50)
+    max_range = median + n*new_median
+    min_range = median - n*new_median
+    return np.clip(series,min_range,max_range)
+
+#进行标准化处理
+def winsorize(factor, std=3, have_negative = True):
+    '''
+    去极值函数 
+    factor:以股票code为index，因子值为value的Series
+    std为几倍的标准差，have_negative 为布尔值，是否包括负值
+    输出Series
+    '''
+    r=factor.dropna().copy()
+    if have_negative == False:
+        r = r[r>=0]
+    else:
+        pass
+    #取极值
+    edge_up = r.mean()+std*r.std()
+    edge_low = r.mean()-std*r.std()
+    r[r>edge_up] = edge_up
+    r[r<edge_low] = edge_low
+    return r
+
+#标准化函数：
+def standardize(s,ty=2):
+    '''
+    s为Series数据
+    ty为标准化类型:1 MinMax,2 Standard,3 maxabs 
+    '''
+    data=s.dropna().copy()
+    if int(ty)==1:
+        re = (data - data.min())/(data.max() - data.min())
+    elif ty==2:
+        re = (data - data.mean())/data.std()
+    elif ty==3:
+        re = data/10**np.ceil(np.log10(data.abs().max()))
+    return re
+
+#获取区间内所有交易日
+def get_tradeday_list(start,end,frequency=None,count=None):
+    if count != None:
+        df = get_price('000001.XSHG',end_date=end,count=count)
+    else:
+        df = get_price('000001.XSHG',start_date=start,end_date=end)
+    if frequency == None or frequency =='day':
+        return df.index
+    else:
+        df['year-month'] = [str(i)[0:7] for i in df.index]
+        if frequency == 'month':
+            return df.drop_duplicates('year-month').index
+        elif frequency == 'quarter':
+            df['month'] = [str(i)[5:7] for i in df.index]
+            df = df[(df['month']=='01') | (df['month']=='04') | (df['month']=='07') | (df['month']=='10') ]
+            return df.drop_duplicates('year-month').index
+        elif frequency =='halfyear':
+            df['month'] = [str(i)[5:7] for i in df.index]
+            df = df[(df['month']=='01') | (df['month']=='06')]
+            return df.drop_duplicates('year-month').index 
+
+#获取第date天往前推count天的交易日
+def tradedays_before(date,count):
+    date = get_price('000001.XSHG',end_date=date,count=count+1).index[0]
+    return date
+
+#获取第一次交易的前g.IC_period天数据
+def get_before_data(context):
+    #获取日期池
+    date = tradedays_before(context.run_params.start_date,g.IC_period*g.period)
+    start = date
+    tradedays = list(get_tradeday_list(start,context.run_params.end_date,frequency=g.frequency))
+    g.trade_day = map(str,tradedays)
+    for i in range(len(g.trade_day)):
+        g.trade_day[i] = g.trade_day[i][:10]
+    #获取股票池，注意股票池要找到回测最后一天的数据
+    pool = {}
+    for d in g.trade_day:
+        pool = set(pool) | set(get_industry_stocks(industry_code = g.industry,date=d))
+    g.pool = list(pool)
+    g.num_stocks = len(g.pool)
+    #获取因子数据
+    df_dict = {}
+    today = str(context.run_params.start_date)[:10]
+    for date in g.trade_day:
+        if date<today:
+            print (date)
+            temp_df = get_factor_data(pool,date)
+            temp_df = temp_df[g.factor]
+            df_dict[date] = temp_df
+        else:
+            break
+    g.factor_data = pd.Panel(df_dict)
+    temp = g.factor_data.transpose(2,0,1)
+    g.factor_data = temp
+
+#动态求IC均值作为因子权重
+def get_IC_mean(data_pro):
+    #所求结果
+    new_weight = []
+    #初始化
+    pl_pro = data_pro.copy()
+    end_label = pl_pro.major_axis[-1]
+    start_label = pl_pro.major_axis[0]
+    #IC_spearman_dict = {}
+    IC_rank_dict = {}
+    for factor in g.factor:
+        x_df = pl_pro.loc[factor,:,:]  #设置不同的输入因子值  factor_mad_std
+        x_df = x_df.applymap(lambda x:float(x))
+        y_df = pl_pro.loc['pct',:,:]
+        y_df = y_df.applymap(lambda x:float(x))
+        #IC_spearman_list = []
+        IC_rank_list = []
+        
+        for i in range(len(x_df.index)):
+            x_rank = x_df.iloc[i,:].rank(method="first")
+            y_rank = y_df.iloc[i,:].rank(method="first")
+            rank_spearman_corr = x_rank.corr(y_rank,method='spearman')
+            IC_rank_list.append(rank_spearman_corr)
+        
+        IC_rank_dict[factor] = IC_rank_list
+    #计算半衰加权
+    #wgt_0 = 0.12
+    #C = 15
+    #shuaijian_list = []
+    #for i in range(g.IC_period):
+    #    shuaijian_list.append(wgt_0*math.exp(float(i-g.IC_period+1)/C))
+    #print (shuaijian_list)
+    for i in range(len(g.factor)):
+        temp = np.array(IC_rank_dict[g.factor[i]])
+        #temp = np.dot(temp,np.array(shuaijian_list))
+        IC_mean = np.nanmean(temp)
+        new_weight.append(IC_mean)
+    g.weight = new_weight
+
+
+'''
+=======================================================
+交易函数区
+=======================================================
+'''
+
+#1 设置策略参数
+def set_params():
+    g.industry = '801150'
+    g.frequency = 'month'   #设置调仓周期
+    g.trade_day = []
+    g.trade_num = 20
+    #原有g.factor
+    g.factor_old = ['pb_ratio',
+     'size_lg',
+     'std_1m',
+     'roe_ttm',
+     'grossprofitmargin_q',
+     'inc_revenue_year_on_year',
+     'operation_profit_to_total_revenue']
+    #新的factor
+    g.factor = ['pb_ratio',
+     'size_lg',
+     'std_1m',
+     'roe_ttm']
+    g.weight = []
+    g.if_trade = False
+    g.period = 21
+    g.IC_period = 12
+    g.first = True
+    g.limit = -0.1
+    #g.factor_data
+
+#2 设置中间变量
+def set_variables():
+    g.pool = []
+    g.num_stocks = 0
+
+# 初始化函数，设定基准等等
+def initialize(context):
+    set_params()
+    # 设定沪深300作为基准
+    set_variables()
+    set_benchmark('000037.XSHG')
+    # 开启动态复权模式(真实价格)
+    set_option('use_real_price', True)
+    # 输出内容到日志 log.info()
+    log.info('初始函数开始运行且全局只运行一次')
+    # 过滤掉order系列API产生的比error级别低的log
+    # log.set_level('order', 'error')
+
+    ### 股票相关设定 ###
+    set_order_cost(OrderCost(close_tax=0.001, open_commission=0.0003, close_commission=0.0003, min_commission=5), type='stock')
+    #初始化
+    get_all_data()
+    #get_before_data(context)
+    ## 运行函数（reference_security为运行时间的参考标的；传入的标的只做种类区分，因此传入'000300.XSHG'或'510300.XSHG'是一样的）
+      # 开盘前运行
+    run_daily(before_market_open, time='before_open', reference_security='000300.XSHG')
+      # 开盘时运行
+    run_daily(market_open, time='open', reference_security='000300.XSHG')
+      # 收盘后运行
+    run_daily(after_market_close, time='after_close', reference_security='000300.XSHG')
+
+## 开盘前运行函数
+def before_market_open(context):
+    # 输出运行时间
+    log.info('函数运行时间(before_market_open)：'+str(context.current_dt.time()))
+    today = context.current_dt.strftime('%Y-%m-%d')
+    if today in g.trade_day:
+        g.if_trade = True
+        #factor_df = get_factor_data(g.pool,today)
+        #factor_df = factor_df[g.factor]
+        #factor_df = factor_df.apply(lambda x:float(x))
+        #g.factor_data.ix[:,context.current_dt.strftime('%Y-%m-%d'),:] = factor_df
+                
+## 开盘时运行函数
+def market_open(context):
+    log.info('函数运行时间(market_open):'+str(context.current_dt.time()))
+    if g.if_trade == True:
+        today = context.current_dt.strftime('%Y-%m-%d')
+        today_num = g.trade_day.index(today)
+        date_list = g.trade_day[today_num-g.IC_period:today_num]
+        pl_dict = {}
+        for date in date_list:
+            temp = g.factor_data[g.factor_data.date==date]
+            #temp[g.factor].applymap(lambda x:float(x))
+            pl_dict[date] = temp
+        data_pro = pd.Panel(pl_dict)
+        data_pro = data_pro.transpose(2,0,1)
+        #data_pro = temp.iloc[(-1*g.IC_period:-1,:),:].copy()
+        #去空值、去极值、标准化、中性化
+        #for date in data_pro.major_axis:
+        #    temp = data_pro.ix[:,date,:].copy()
+        #    temp = winsorize_med(temp, scale=5, inf2nan=False,axis=0)
+        #    temp = replace_nan_indu(temp,g.pool,industry_code=[g.industry],date=date)
+        #    temp = neutralize(temp,how=['sw_l1','market_cap'],date=date,axis=0,fillna='sw_l1')
+        #    temp = standardlize(temp,axis=0)
+        #    data_pro.ix[:,date,:] = temp
+        #data_pro = delete_nan(g.factor,data_pro)
+        #data_pro = neutralize(data_pro,how=['market_cap'],date=str(context.current_dt.time()),axis=0)
+        #for factor in g.factor:
+        #    factor_df = data_pro.loc[factor,:,:].copy() #获取因子df
+        #    for i in factor_df.index:
+        #        factor_df.loc[i,:] = filter_extreme_MAD(factor_df.loc[i,:],3)#去极值 
+        #        factor_df.loc[i,:] = standardize(factor_df.loc[i,:],ty=2)    #标准化
+        #    data_pro[factor] = pd.DataFrame(factor_df,index=data_pro.major_axis, columns=data_pro.minor_axis)
+        #计算新的权重
+        get_IC_mean(data_pro)
+        pl_dict[today] = g.factor_data[g.factor_data.date==today]
+        data_pro = pd.Panel(pl_dict)
+        data_pro = data_pro.transpose(2,0,1)
+        #计算多因子加权后排名
+        factor_df = data_pro.loc[g.factor,today,:].copy()
+        factor_df = factor_df.applymap(lambda x:float(x))
+        for i in range(0,len(factor_df.columns)):
+            factor_df = factor_df.sort_index(by=factor_df.columns[i],ascending=True)
+            rank = range(1,len(factor_df.index)+1)
+            factor_df[factor_df.columns[i]+'_rank'] = rank
+        rank_sum = np.dot(factor_df.iloc[:,len(g.factor):len(factor_df.columns)].as_matrix(),np.array(g.weight))
+        factor_df['total_score'] = rank_sum
+        #date_list = list(pl_pro.major_axis)
+        #for i in range(len(new_weight)):
+        #    new_weight[i] = new_weight[i]*wgt_0*math.exp((i-len(new_weight)+1)/C)
+        factor_df = factor_df.sort_index(by='total_score',ascending=False)
+        factor_df['total_rank'] = range(1,len(factor_df.index)+1)
+        if len(list(context.portfolio.positions.keys()))==0:
+            total_value = context.portfolio.total_value
+            for i in range(g.trade_num):
+                value = float(total_value/g.trade_num)
+                order_target_value(factor_df.index[i],value)
+        else:
+            for stock_to_sell in list(context.portfolio.positions.keys()):
+                if stock_to_sell not in factor_df.index[0:g.trade_num]:
+                    order_target_value(stock_to_sell, 0)
+            total_value = context.portfolio.total_value
+            #total_w = np.nansum(np.array(factor_df['total_score'].iloc[:g.trade_num]))
+            for i in range(g.trade_num):
+                value = float(total_value/g.trade_num)
+                order_target_value(factor_df.index[i],value)
+        g.if_trade = False
+    #风险管控手段
+    now_handle = list(context.portfolio.positions.keys())
+    for stock in now_handle:
+        cost = context.portfolio.positions[stock].avg_cost
+        price = context.portfolio.positions[stock].price
+        if (cost/price)-1<g.limit:
+            order_target(stock,0)
+            log.info('触发止损:'+stock)
+
+## 收盘后运行函数
+def after_market_close(context):
+    log.info(str('函数运行时间(after_market_close):'+str(context.current_dt.time())))
+    #得到当天所有成交记录
+    trades = get_trades()
+    for _trade in trades.values():
+        log.info('成交记录：'+str(_trade))
+    log.info('一天结束')
+    log.info('##############################################################')

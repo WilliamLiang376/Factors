@@ -1,0 +1,173 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 原文网址：https://www.joinquant.com/view/community/detail/16385
+"""
+## 三进兵变形版做了如下的思考：
+- 长期均线对价格既有助涨作用，也有压制作用；
+- 当价格长期处于长期均线下方时，价格往往会被压制，等待突破并扭转趋势的那一刻；
+- 当价格长期处于长期均线上方时，价格受到长期均线的支撑作用，直到彻底跌破长期均线，走向熊市。
+## 变形思考：
+- 当中期均线已经在长期均线上方（表明趋势已经转牛，这是相对而言），并且当短期均线回调再突破中期均线的时候就买入；
+- 跌破均线的时候可以做个小波段的卖出。
+**这里的卖出包含了止损的思想，所以这里不需要加止损。**
+## 选股思考：
+至于选股：与其拼命看各种基本面指标，看盘口等，倒不如直接把牛公司的股票拿来做测试，比如：格力、五粮液、茅台等。
+"""
+
+import numpy as np
+import pandas as pd
+import datetime
+from jqdata import *
+from jqlib.technical_analysis import *
+
+def initialize(context):
+    log.info('运行[initialize]函数，时间节点：', context.current_dt)
+    
+    # 所谓的三进兵，就是这里的三个Ma线
+    g.ma_min = 2
+    g.ma_med = 25
+    g.ma_max = 60
+    
+    # 设定沪深300作为基准
+    set_benchmark('000300.XSHG')
+    # 开启动态复权模式(真实价格)
+    set_option('use_real_price', True)
+    # 设置成交量比例
+    set_option('order_volume_ratio', 0.25)
+    # 日志过滤
+    log.set_level('order', 'error')
+    # 为股票设定滑点为百分比滑点
+    set_slippage(PriceRelatedSlippage(0.00246),type='stock')
+    # 股票类每笔交易时的手续费是：买入时佣金万分之三，卖出时佣金万分之三加千分之一印花税, 每笔交易佣金最低扣5块钱
+    set_order_cost(OrderCost(close_tax=0.001, open_commission=0.0003, close_commission=0.0003, min_commission=5), type='stock')
+    g.stokcs_pool = ['300014.XSHE', '300059.XSHE', '300168.XSHE', '300253.XSHE', '300274.XSHE', '000651.XSHE', '000858.XSHE', '600809.XSHG']
+    g.hold_count = 5
+    run_daily(trade_func, 'open') 
+
+def trade_func(context):
+    log.info('运行[trade_func]函数，时间节点：', context.current_dt)
+    
+    # 整合日期
+    days = get_trade_days(end_date=context.current_dt.date(), count=5)
+    yesterday = days[-2]
+    before_yesterday = days[-3]
+
+    for stock in context.portfolio.positions.keys():
+        # 判断是否有卖出信号 
+        re_value = is_sell(stock, yesterday, before_yesterday, g.ma_min,g.ma_med,g.ma_max)
+
+        if re_value:
+            log.info('卖出标的：',stock)
+            order_target(stock, 0)
+    
+    for stock in g.stokcs_pool:
+        # 判断是否有买入信号
+        re_value = is_buy(stock, yesterday, before_yesterday, g.ma_min,g.ma_med,g.ma_max)
+
+        if re_value:
+            if stock in context.portfolio.positions.keys():
+                continue
+            log.info('买入标的：',stock)
+            
+            if g.hold_count <= len(context.portfolio.positions):
+                break
+            buy_count = g.hold_count - len(context.portfolio.positions)
+            cash = context.portfolio.available_cash/(buy_count*1.5)
+            order_value(stock, cash)
+
+
+def after_trading_end(context):
+    log.info('运行[after_trading_end]函数，时间节点：', context.current_dt)
+    
+    log.info('='*50)
+
+# 获取ma值
+def get_ma(stock, ma_value, end_dt):
+    price = get_price(security=stock, 
+                      end_date=end_dt, 
+                      frequency='daily', 
+                      fields=['close'], 
+                      skip_paused=False, 
+                      fq='pre', 
+                      count=ma_value+10)['close']
+    ma = price[-ma_value:].mean()
+    return ma
+
+# 获取ema值
+def get_ema(stock, ma_value, end_dt):
+    ema = EMA(stock, check_date=end_dt, timeperiod=ma_value)
+    return ema[stock]
+
+# 判断是否出现买入信息
+def is_buy(stock, yesterday, before_yesterday, *ema):
+    ma_min = ema[0]
+    ma_med = ema[1]
+    ma_max = ema[2]
+    
+    # 求出上一个交易日的ma_min，ma_med,ma_max的值
+    y_ma_min_value = get_ema(stock, ma_min, yesterday)
+    y_ma_med_value = get_ema(stock, ma_med, yesterday)
+    y_ma_max_value = get_ema(stock, ma_max, yesterday)
+
+    # 求出上上个交易日的ma_min，ma_med,ma_max的值
+    by_ma_min_value = get_ema(stock, ma_min, before_yesterday)
+    by_ma_med_value = get_ema(stock, ma_med, before_yesterday)
+    by_ma_max_value = get_ema(stock, ma_max, before_yesterday)
+
+    if (y_ma_min_value > y_ma_med_value) and (by_ma_min_value < by_ma_med_value) and (y_ma_med_value > y_ma_max_value):
+        log.info('标的{}有买入信号'.format(stock))
+        return True
+    else:
+        return False
+    
+# 判断是否有卖出信息
+def is_sell(stock, yesterday, before_yesterday, *ema):
+    ma_min = ema[0]
+    ma_med = ema[1]
+    ma_max = ema[2]
+    
+    # 求出上一个交易日的ma_min，ma_med,ma_max的值
+    y_ma_min_value = get_ema(stock, ma_min, yesterday)
+    y_ma_med_value = get_ema(stock, ma_med, yesterday)
+    y_ma_max_value = get_ema(stock, ma_max, yesterday)
+
+    # 求出上上个交易日的ma_min，ma_med,ma_max的值
+    by_ma_min_value = get_ema(stock, ma_min, before_yesterday)
+    by_ma_med_value = get_ema(stock, ma_med, before_yesterday)
+    by_ma_max_value = get_ema(stock, ma_max, before_yesterday)
+
+    if (y_ma_min_value < y_ma_med_value) and (by_ma_min_value > by_ma_med_value) and (y_ma_med_value > y_ma_max_value):
+        log.info('标的{}有卖出信号'.format(stock))
+        return True
+    else:
+        return False
+        
+        
+# 判断是否有止损信息
+def is_loss(stock, yesterday, *ema):
+    ma_min = ema[0]
+    ma_med = ema[1]
+    ma_max = ema[2]
+    
+    # 昨日收盘价
+    close = get_price(security=stock, 
+                          end_date=yesterday,
+                          frequency='daily', 
+                          fields=['open','close'], 
+                          skip_paused=False, 
+                          fq='pre', 
+                          count=10)['close'][-1] 
+    
+    
+    # 求出上一个交易日的ma_min，ma_med,ma_max的值
+    y_ma_min_value = get_ema(stock, ma_min, yesterday)
+    y_ma_med_value = get_ema(stock, ma_med, yesterday)
+    y_ma_max_value = get_ema(stock, ma_max, yesterday)
+    
+    if (close > y_ma_med_value) and (y_ma_med_value > y_ma_max_value):
+        log.info('标的{}有止损信号'.format(stock))
+        return True
+    else:
+        return False
+
+    

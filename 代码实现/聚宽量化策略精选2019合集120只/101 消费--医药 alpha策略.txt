@@ -1,0 +1,108 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/20196
+# 标题：消费--医药 alpha策略
+# 作者：Gyro
+
+import pandas as pd
+
+def initialize(context):
+    set_option("avoid_future_data", True)
+    set_benchmark('000300.XSHG')
+    log.set_level('order', 'error')
+    set_option('use_real_price', True)
+    # system variable
+    g.inv_stock = False #系统状态
+    g.weight = pd.Series() # 组合权重
+    g.inv_value_max = context.portfolio.total_value
+
+def after_code_changed(context):
+    # system parameter
+    g.index = '000300.XSHG' #参考指数, 沪深300
+    g.bonds_funds = pd.Series({
+        '511990.XSHG': 0.50, #华宝添翼
+        '511010.XSHG': 0.30, #国债ETF
+        '518880.XSHG': 0.15, #黄金ETF
+        })
+    g.industrials = [
+        '801110', #申万一级行业，家电
+        '801120', #申万一级行业，食品饮料
+        '801150', #申万一级行业，医药生物
+        ]
+    g.choice_num = 5 #个股数量
+
+# prepare data
+def before_trading_start(context):
+    # risk controlling
+    h = history(61, '1d', 'close', [g.index], df=True)
+    p = h[g.index]
+    trd = p[-1]/p.mean() > 1.0
+    if g.inv_stock:
+        if not trd and \
+            context.portfolio.total_value < 0.9*g.inv_value_max:
+            g.inv_stock = False
+    elif trd:
+            g.inv_stock = True # restart the investing
+            g.inv_value_max = context.portfolio.total_value # reset the record
+    log.info('stock model', g.inv_stock)
+    # weight
+    if g.inv_stock:
+        weight = iStocks_weight(g.industrials, g.index)
+    else:
+        weight = g.bonds_funds
+    # print
+    g.weight = weight.sort_values(ascending=False)
+    cur_data = get_current_data()
+    for stock in g.weight.keys():
+        log.info(stock, cur_data[stock].name, 100*g.weight[stock])
+
+# position management
+def handle_data(context, data):
+    cur_data = get_current_data()
+    # sell
+    for stock in context.portfolio.positions:
+        if stock not in g.weight.keys() and\
+            not cur_data[stock].paused:
+            log.info('sell', stock, cur_data[stock].name)
+            order_target(stock, 0)
+    # buy
+    for stock in g.weight.keys():
+        position =  g.weight[stock] * context.portfolio.total_value
+        if stock not in context.portfolio.positions.keys() and\
+                not cur_data[stock].paused and\
+                context.portfolio.available_cash > position:
+                log.info('buy', stock, cur_data[stock].name, 100*g.weight[stock])
+                order_value(stock, position)
+
+def iStocks_weight(industrials, index):
+    allstocks = get_index_stocks(index) #指数成分股
+    # industial stocks of the index
+    stocks = []
+    for ix in industrials:
+        istocks = get_industry_stocks(ix)
+        istocks = [s for s in istocks if s in allstocks]
+        df = get_fundamentals(query(
+                valuation.code,
+            ).filter(
+                valuation.pb_ratio > 0,
+                valuation.pe_ratio > 0,
+                valuation.pcf_ratio > 0,
+                valuation.code.in_(istocks),
+            ).order_by((valuation.market_cap/valuation.pcf_ratio).desc()
+            ).limit(g.choice_num)
+            ).dropna()
+        stocks = stocks + list(df['code'])
+    # market-value weight 
+    df = get_fundamentals(query(
+            valuation.code,
+            valuation.market_cap
+        ).filter(
+            valuation.code.in_(list(stocks)),
+        )).dropna().set_index('code')
+    weight = df['market_cap']/sum(df['market_cap'])
+    return weight
+
+# record data
+def after_trading_end(context):
+    g.inv_value_max = max(g.inv_value_max, context.portfolio.total_value)
+# end

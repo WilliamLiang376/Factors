@@ -1,0 +1,62 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/16998
+# 标题：【配对交易】基于zscore的配对交易策略（胜率88.2%）
+# 作者：Matthew_Zou
+
+# 导入函数库
+from datetime import datetime
+from jqdata import *
+
+# 初始化函数，设定基准等等
+def initialize(context):
+    set_option("avoid_future_data", True)
+    # 设定沪深300作为基准
+    set_benchmark('000300.XSHG')
+    # 开启动态复权模式(真实价格)
+    set_option('use_real_price', True)
+    # 过滤掉order系列API产生的比error级别低的log
+    log.set_level('order', 'error')
+    ### 股票相关设定 ###
+    # 股票类每笔交易时的手续费是：买入时佣金万分之三，卖出时佣金万分之三加千分之一印花税, 每笔交易佣金最低扣5块钱
+    set_order_cost(OrderCost(close_tax=0.001, open_commission=0.0003, close_commission=0.0003, min_commission=5), type='stock')
+    run_daily(market_open, time='every_bar', reference_security='000300.XSHG')
+
+    g.code1 = '002415.XSHE'
+    g.code2 = '000651.XSHE'
+    g.window = 60
+    g.high = 2
+    g.low  = -2
+    g.hold = 0
+    
+## 开盘时运行函数
+def market_open(context):
+    yesterday = (context.current_dt - datetime.timedelta(1)).strftime('%Y-%m-%d')
+    zscore = get_zscore(yesterday)
+    # print(yesterday, zscore)
+    record(zscore=zscore)
+    record(high=g.high)
+    record(low=g.low)
+    if(g.hold != 1 and zscore <= g.low):
+        # 股票1超跌或股票2超涨，买股票1
+        order_target(g.code2, 0)
+        order_value(g.code1, context.portfolio.available_cash)
+        print('buy1')
+        g.hold = 1
+    elif(g.hold != 2 and zscore >= g.high):
+        # 股票1超涨或股票2超跌，买股票2
+        order_target(g.code1, 0)
+        order_value(g.code2, context.portfolio.available_cash)
+        print('buy2')
+        g.hold = 2
+
+# 计算zscore
+# 传入的date应为昨天的日期，而不是今天，防止未来函数
+def get_zscore(date):
+    price_df = get_price([g.code1, g.code2], end_date=date, count=g.window, fields='close').close
+    sub = price_df[g.code1] - price_df[g.code2]
+    ma = sub.mean()
+    std = sub.std()
+    zscore = round((sub[-1] - ma) / std, 4)
+    return zscore
+    

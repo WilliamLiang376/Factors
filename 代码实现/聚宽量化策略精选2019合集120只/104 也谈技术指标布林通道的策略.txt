@@ -1,0 +1,86 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/17129
+# 标题：也谈技术指标布林通道的策略
+# 作者：zzwtjbc2019
+
+# 克隆自聚宽文章：https://www.joinquant.com/post/144
+# 标题：量化投资学习【TA-LIB】之Bollinger Bands
+# 作者：冰柠檬
+
+
+
+#此例子采用Talib提供的BBANDS( Bollinger Bands )
+#布林线（Boll）指标是通过计算股价的“标准差”，再求股价的“信赖。
+#该指标在图形上画出三条线，其中上下两条线可以分别看成是股价的阻力线和支撑线，
+#而在两条线之间还有一条股价平均线，布林线指标的参数最好设为20。
+#一般来说，股价会运行在压力线和支撑线所形成的通道中。
+import talib,xlwt
+#import numpy as np
+import pandas as pd
+
+def initialize(context):
+    # 定义一个全局变量, 保存要操作的证券
+    context.stocks = ['000002.XSHE']#,'601328.XSHG','600196.XSHG','600010.XSHG']
+    # 设置我们要操作的股票池
+    set_universe(context.stocks)
+    g.result=pd.DataFrame()
+# 初始化此策略
+
+def on_strategy_end(context):
+    g.result.to_excel('myresult.xls')
+
+    return
+
+
+
+def handle_data(context, data):
+    # 取得当前的现金
+    cash = context.portfolio.cash
+    # 循环股票列表
+    
+    for stock in context.stocks:
+        # 获取股票的数据
+        h = attribute_history(stock, 32, '1d', ('high','low','close'))
+        # 创建布林线买卖信号，包括价格和参数
+        # 注意：函数使用的price必须是narray
+        upper, middle, lower = talib.BBANDS(
+                h['close'].values, 
+                timeperiod=27,
+                # number of non-biased standard deviations from the mean
+                nbdevup=2.3,
+                nbdevdn=2.3,
+                # Moving average type: simple moving average here
+                matype=0)
+        # 获取当前股票的数据
+        current_position = context.portfolio.positions[stock].amount
+        # 获取当前股票价格
+        current_price = data[stock].price
+        ind=h.index[-1]
+        g.result.at[ind,'close']=h['close'][-1]
+        g.result.at[ind,'high']=h['high'][-1]
+        g.result.at[ind,'low']=h['low'][-1]
+        g.result.at[ind,'upper']=upper[-1]
+        g.result.at[ind,'lower']=lower[-1]
+        g.result.at[ind,'cash']=cash
+        g.result.at[ind,'position']=current_position
+        g.result.at[ind,'price']=current_price
+        #g.result.at[ind,'close']=h['close'][-1]
+
+        # 当价格突破阻力线upper后回归到upper下方时，且拥有的股票数量>=0时，卖出所有股票
+        if current_price <= upper[-1] and h['close'][-2]>upper[-2] and current_position >= 0:
+            order(stock, int(current_position/100)*100*(-1))
+        # 当价格跌破支撑线l后回归到ower时, 且拥有的股票数量<=0时，则全仓买入
+        elif current_price >= lower[-1]  and h['close'][-2] <lower[-2] and cash > 1.0:
+            number_of_shares = int(cash/current_price/100)*100
+            # 购买量大于0时，下单
+            if number_of_shares > 0:
+                # 买入股票
+                order(stock, +number_of_shares)
+                # 记录这次买入
+                log.info("Buying %s" % (stock))
+        record(upper=upper[-1],
+           lower=lower[-1],
+           mean=middle[-1],
+           price=current_price,
+           position_size=current_position)

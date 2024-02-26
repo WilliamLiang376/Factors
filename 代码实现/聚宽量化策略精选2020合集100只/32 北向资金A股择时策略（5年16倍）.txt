@@ -1,0 +1,122 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/28714
+# 标题：北向资金A股择时策略（5年16倍）
+# 作者：Matt9419
+# 回测资金需要设置100万.
+
+import pandas as pd
+from jqdata import finance
+
+def initialize(context):
+    set_params()
+    set_benchmark('000300.XSHG')
+    set_option('use_real_price', True)
+    log.set_level('order', 'error')
+
+    set_subportfolios([SubPortfolioConfig(cash=context.portfolio.starting_cash, type='index_futures')])
+    set_order_cost(OrderCost(open_commission=0.000023, close_commission=0.000023,close_today_commission=0.0023), type='index_futures')
+    set_option('futures_margin_rate', g.margin_rate)
+
+    run_daily(before_market_open, time='07:00', reference_security='IF8888.CCFX')
+    run_daily(market_open, time='09:30', reference_security='IF8888.CCFX')
+    
+def set_params():
+    """
+    全局变量设定
+    """
+    # 期货合约
+    g.future_symbol = 'IF'
+    # 保证金率
+    g.margin_rate = 0.1
+    # 布林带参数
+    g.window = 252
+    g.stdev_n = 1.5
+    # 资金占用比例
+    g.cash_rate = 0.5
+    
+    g.mf, g.upper, g.lower = None, None, None
+    g.hold_future = ''
+
+def before_market_open(context):
+    """
+    开盘前运行
+    """
+    pre_date = (context.current_dt - datetime.timedelta(1)).strftime('%Y-%m-%d')
+    g.mf, g.upper, g.lower = get_boll(pre_date)
+    log.info('%.2f %.2f %.2f' % (g.mf, g.upper, g.lower))
+
+def market_open(context):
+    """
+    开盘运行
+    """
+    # 获取当日主力合约
+    dom_future = get_dominant_future(g.future_symbol)
+    if get_security_info(dom_future).end_date.strftime('%Y-%m-%d') == context.current_dt.strftime('%Y-%m-%d'):
+        dom_future = get_future_contracts(g.future_symbol)[1]
+    # 有持仓
+    if len(g.hold_future):
+        long_positions = context.portfolio.positions
+        if g.hold_future in long_positions:
+            # 平多
+            if g.mf < g.lower:
+                order_target(g.hold_future, 0)
+                g.hold_future = ''
+                log.info('sell close')
+            # 移仓换月
+            elif g.hold_future != dom_future:
+                order_target(g.hold_future, 0)
+                log.info('sell close')
+                cash = context.portfolio.available_cash * g.cash_rate
+                order_value(dom_future, cash)
+                g.hold_future = dom_future
+                log.info('buy open')
+        else:
+            # 平空
+            if g.mf > g.upper:
+                order_target(g.hold_future, 0, side='short')
+                g.hold_future = ''
+                log.info('buy close')
+            # 移仓换月
+            elif g.hold_future != dom_future:
+                order_target(g.hold_future, 0, side='short')
+                log.info('buy close')
+                cash = context.portfolio.available_cash * g.cash_rate
+                order_value(dom_future, cash, side='short')
+                g.hold_future = dom_future
+                log.info('sell open')
+    # 无持仓
+    if len(g.hold_future) == 0:
+        cash = context.portfolio.available_cash * g.cash_rate
+        # 开多
+        if g.mf > g.upper:
+            order_value(dom_future, cash)
+            g.hold_future = dom_future
+            log.info('buy open')
+        # 开空
+        # elif g.mf < g.lower:
+        #     order_value(dom_future, cash, side='short')
+        #     g.hold_future = dom_future
+        #     log.info('sell open')
+
+def get_boll(end_date):
+    """
+    获取北向资金布林带
+    """
+    table = finance.STK_ML_QUOTA
+    q = query(
+        table.day, table.quota_daily, table.quota_daily_balance
+    ).filter(
+        table.link_id.in_(['310001', '310002']), table.day<=end_date
+    ).order_by(table.day)
+    money_df = finance.run_query(q)
+    money_df['net_amount'] = money_df['quota_daily'] - money_df['quota_daily_balance']
+    # 分组求和
+    money_df = money_df.groupby('day')[['net_amount']].sum().iloc[-g.window:]
+    mid = money_df['net_amount'].mean()
+    stdev = money_df['net_amount'].std()
+    upper = mid + g.stdev_n * stdev
+    lower = mid - g.stdev_n * stdev
+    mf = money_df['net_amount'].iloc[-1]
+    return mf, upper, lower
+

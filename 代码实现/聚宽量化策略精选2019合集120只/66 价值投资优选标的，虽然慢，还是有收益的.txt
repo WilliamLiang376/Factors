@@ -1,0 +1,584 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/20963
+# 标题：价值投资优选标的，虽然慢，还是有收益的
+# 作者：清水湾量化
+
+# 本策略请选择 python 2 下回测
+
+
+from kuanke.wizard import *
+from jqdata import *
+import numpy as np
+import pandas as pd
+import talib
+import datetime
+
+'''
+================================================================================
+总体回测前
+================================================================================
+'''
+def initialize(context):
+    set_option("avoid_future_data", True)
+
+    set_backtest()
+    
+
+def process_initialize(context):
+       
+    # 设置参数
+    set_params()
+    # 设置全局变量
+    set_variables()
+    # 设置回测
+
+    # 股票筛选排序初始化函数
+    # 股票筛选初始化函数
+    #check_stocks_initialize()
+    # 股票筛选排序初始化函数
+    check_stocks_sort_initialize()
+
+
+# 设置参数
+def set_params():
+    # 设置股票池
+    g.security = get_index_stocks('000300.XSHG')
+    g.security_zz500 = get_index_stocks('000905.XSHG')
+    g.security_gqgg = get_index_stocks('399974.XSHE')
+
+    # 测试多头趋势的均线长度
+    #g.ma_lengths = [5,10,20,60]
+    g.ma_lengths = [5,10,20,60,120]
+    # 测试买入回踩的均线长度
+    g.test_ma_length = 10
+    # 买入时回踩但必须站住的均线
+    g.stand_ma_length = 20
+    # 同时最多持有几支股票
+    g.num_stocks = 5
+    # 多头趋势天数
+    g.in_trend_days = 10
+
+    #回测及实盘交易的不同值，回测设为0，实盘为1
+    #g.huice_shipan = 0
+    g.huice_shipan = 1
+
+    #不可重复买入
+    g.filter_holded = False
+
+# 2
+# 设置全局变量
+def set_variables():
+    # 可行股票池
+    g.available_stocks = []
+
+# 3
+# 设置回测
+def set_backtest():
+    # 一律使用真实价格
+    set_option('use_real_price', True)
+    # 过滤log
+    log.set_level('order', 'error')
+    # 设置基准
+    set_benchmark('000300.XSHG')
+
+def check_stocks_sort_initialize():
+    # 总排序准则： desc-降序、asc-升序
+    g.check_out_lists_ascending = 'desc'
+
+
+'''
+================================================================================
+每日回测前
+================================================================================
+'''
+def before_trading_start(context):
+    # 设置滑点、手续费和指数成分股
+
+    print("==========================================================================")
+    print("新的一天开始了，祝君好运")
+    print("优先采用多头回踩策略")
+    set_slip_fee(context)
+
+
+
+# 4
+# 根据不同的时间段设置滑点与手续费并且更新指数成分股
+def set_slip_fee(context):
+    # 更新指数成分股
+    g.security = get_index_stocks('000300.XSHG')
+    g.security_zz500 = get_index_stocks('000905.XSHG')
+    g.security_gqgg = get_index_stocks('399974.XSHE')
+
+    # 将滑点设置为0
+    set_slippage(PriceRelatedSlippage(0.002)) 
+    # 根据不同的时间段设置手续费
+    dt=context.current_dt
+    
+    if dt>datetime.datetime(2013,1, 1):
+        set_commission(PerTrade(buy_cost=0.0003, sell_cost=0.0013, min_cost=5)) 
+
+        
+    elif dt>datetime.datetime(2011,1, 1):
+        set_commission(PerTrade(buy_cost=0.001, sell_cost=0.002, min_cost=5))
+            
+    elif dt>datetime.datetime(2009,1, 1):
+        set_commission(PerTrade(buy_cost=0.002, sell_cost=0.003, min_cost=5))
+                
+    else:
+        set_commission(PerTrade(buy_cost=0.003, sell_cost=0.004, min_cost=5))
+
+
+'''
+================================================================================
+每天交易时
+================================================================================
+'''
+# 每个回测单位
+def handle_data(context, data):
+    
+    # 选取有效股票
+    g.available_stocks = get_available_stocks(context)
+    # 产生卖出信号
+    to_sell = sell_signal(context)
+    # 卖出股票
+    sell_stocks(to_sell)
+    # 产生买入信号
+    to_buy = buy_signal(g.available_stocks, context)
+    # 买入该买的股票
+    buy_stocks(to_buy,context)
+    log.info("15.已执行完当日操作")
+# 6
+# 获取卖出信号
+# 返回一list，是所有达到止盈或者止损线的股票
+def sell_signal(context):
+
+    to_sell = []
+    #previous_dapan = attribute_history('000300.XSHG', 1, '1d', ['close','low'])
+    #current_dapan_price = previous_dapan['close'].iloc[0]
+
+    ##############################################################
+    ##根据大盘的情况来设置不同程度的止盈止损点，当指数过高意味着投机成分加大则适当减小止盈点
+    ##############################################################
+    
+    cut_gain_percentage=0.1
+    cut_loss_percentage=0.1
+
+
+
+    # 建立需要卖出的股票list 
+    
+    if len(context.portfolio.positions) == 0:
+        log.info("7. 今日空仓")
+    #sell_lists = []
+    # 对于仓内所有股票
+    for security in context.portfolio.positions:
+        # 取现价
+        current_price = history(1, '1m', 'close', security).iloc[0].iloc[0]
+        # 获取买入平均价格
+        avg_cost = context.portfolio.positions[security].avg_cost
+        # 计算止盈线
+        high = avg_cost * (1+ cut_gain_percentage)
+        # 计算止损线
+        low = avg_cost*(1-cut_loss_percentage)
+
+        ################################################################
+        #以持仓日期内的最高价计算止损线，可以尽最大可能保留已经赚取的利润
+        #keep_day_range = len(get_trade_days(start_date = context.portfolio.positions[security].transact_time, end_date = context.current_dt))  
+        #close_data_keepday = attribute_history(security, keep_day_range, '1d', ['close'])
+        #获取持仓期间的最高价
+        #max_keepday_security_close = close_data_keepday['close'].max()
+        
+        #log.info(security,"持有天数",keep_day_range,max_keepday_security_close)
+
+        ##############################################################
+
+        # 如果价格突破了止损或止盈线
+
+        ##############################################################
+        ##############################################################
+
+        log.info("7. ",security, "现价", current_price, "成本价",avg_cost, "止盈线",high,"止损线", low)
+
+        ##形态止损条件依次为：两只乌鸦，三只乌鸦，乌云盖顶，流星线
+        if CDL2CROWS_judge(security) or CDL3BLACKCROWS_judge(security) or CDLDARKCLOUDCOVER_judge(security) :
+
+            to_sell.append(security)
+            log.info(security, "形态止损，卖出股票")
+        #止损点
+        elif current_price <= low :
+            # 全部卖出
+            to_sell.append(security)
+            log.info(security,"止损平仓，卖出股票")
+        #止盈点
+        elif current_price >= high :
+            to_sell.append(security)
+            log.info(security, "止盈平仓，卖出股票")
+    log.info("8. 已执行完sell signal操作")
+    return(to_sell)
+
+# 7
+# 卖出函数
+# 输入一list股票
+# 执行卖出
+def sell_stocks(to_sell):
+    for security in to_sell:
+        order_target(security, 0)
+        log.info("已经执行卖出如下股票",security)
+
+# 8
+# 计算买入信号
+# 输入所有多头趋势股票
+# 返回一list，包含所有在趋势内但是踩到测量均线的股票
+def buy_signal(available_stocks, context):
+    
+    
+    signal = []
+    security_list = []
+
+
+    ##############################################################
+    ## 两种考虑，当行情好时自然KDJ等各指数都是高位，利用多头回踩可抓住大牛
+    ##############################################################
+
+
+    security_list = get_in_trends(available_stocks, context)
+    log.info("12.buy sinal中get in trends的股票列表security_list，应当与available_stocks一致",security_list)
+
+    if len(security_list) == 0:
+        log.info("13.未能选出可用的股票" )
+
+    for security in security_list:
+        # 获取历史收盘价
+        past_prices = attribute_history(security,g.test_ma_length, '1d', 'close', skip_paused = True)
+        # 计算均线
+        test_ma = sum(past_prices).iloc[0] / g.test_ma_length
+        # 获取站住均线数据
+        past_prices_2 = attribute_history(security, g.stand_ma_length, '1d', 'close', skip_paused= True) 
+        # 计算均线
+        stand_ma = sum(past_prices_2).iloc[0] / g.stand_ma_length
+        # 获取昨日信息
+        previous_history = attribute_history(security, 1, '1d', ['close','low'])
+        # 昨日收盘价
+        current_price = previous_history['close'].iloc[0]
+        # 昨日最低价
+        previous_low = previous_history['low'].iloc[0]
+
+        ##如果上证指数60天线斜率向下，则不买入任何股票
+        previous_history_dapan = attribute_history('000300.XSHG', 15, '1d', ['close','low'])
+        previous_price_dapan = previous_history_dapan['close'].iloc[0]
+
+        current_history_dapan = attribute_history('000300.XSHG', 1, '1d', ['close','low'])
+        current_price_dapan = current_history_dapan['close'].iloc[0]
+
+        slope_dapan = (current_price_dapan - previous_price_dapan) / 15
+
+
+        log.info("13", security,"当前价格应当小于标准价格","必须站住价格",stand_ma,"< 当前价",current_price,"< 必须低于的标准价格",test_ma, )
+        # 如果该股票没有持仓，并且前收盘价高于目标均线
+        if slope_dapan < 0:
+            log.info("大盘前60天前到今的斜率为负，不买入任何股票，持币")  
+
+        elif slope_dapan >= 0 and stand_ma <= current_price <= test_ma and security not in context.portfolio.positions:
+            # 加入信号list 
+            signal.append(security)
+
+    if len(signal) !=0:
+        log.info("当前股价判定符合多头趋势，最终加入股票signal",signal)    
+    log.info("14.已执行完buy signal操作")
+    return(signal[0:g.num_stocks])
+
+##############################################################
+## 多头的寻找利用joinquant的官方策略来制定
+##############################################################
+
+
+# 5
+# 选取有效股票
+# 输出一list，包含所有数据达到最长均线天数，并且今日不停牌的股票
+def get_available_stocks(context):
+    print("1. 选股启动中")
+
+    total_security_list = []
+    available_stocks = []
+
+    # 获取最长均线长度
+    longest_ma = max(g.ma_lengths)
+    # 开空list 
+    
+    # 获取现在数据
+    current_data = get_current_data(security_list=None)
+    # 对于股票池里的所有股票
+    
+    ##############################################################
+    ##利用各种filter过滤掉不符合条件的股票，主要用财务数据来选择
+    ##############################################################
+
+    #g.check_out_lists = g.security + g.security_zz500
+
+    #沪深300的checkout
+    g.check_out_lists = g.security
+    g.check_out_lists = financial_statements_filter(context, g.check_out_lists)
+    log.info("2. 符合财务指标的沪深300股票")  
+    log.info(g.check_out_lists)  
+
+    ##中证500里面的checkout
+    #g.security_gqgg = get_index_stocks('399974.XSHG')
+
+    g.check_out_lists_zz500 = g.security_zz500 + g.security_gqgg
+    g.check_out_lists_zz500 = financial_statements_filter_zz500(context, g.check_out_lists_zz500)
+
+    log.info("3. 符合财务指标的中证500股票")  
+    log.info(g.check_out_lists_zz500)  
+    #total_security_list = g.check_out_lists_zz500 + g.check_out_lists
+
+    total_security_list =  g.check_out_lists
+
+
+    for security in total_security_list:
+        
+        #过滤创业板
+        if security[0:3]!= '300':
+        #过滤ST
+            if not current_data[security].is_st:
+        #过滤退市
+                if not (('退' in current_data[security].name) or ('*' in current_data[security].name)):
+        #过滤涨停
+                    if current_data[security].day_open < current_data[security].high_limit*0.985:
+        
+                        # 检查是否停牌
+                        is_paused = current_data[security].paused
+                        # 获取过去数据
+                        past_prices = attribute_history(security,longest_ma + g.in_trend_days, '1d', 'close',  skip_paused=True)
+                        # 第一个数据是否无效
+                        is_nan = isnan(past_prices.iloc[0,0])
+
+                        # 如果没停牌并且数据够长
+                        if not is_paused and not is_nan:
+                            # 股票加入list
+                            available_stocks.append(security)
+                            # 返回list
+
+    log.info("4. 基本财务指标选出的总股票列表")
+    log.info(available_stocks)
+
+    input_dict = get_check_stocks_sort_input_dict()
+    available_stocks = check_stocks_sort(context,available_stocks,input_dict,g.check_out_lists_ascending)
+
+    log.info("5. 按ROE排列后的股票顺序available_stocks")
+    log.info(available_stocks)
+
+    log.info("6. 已执行完get_available_stocks操作")
+    return(available_stocks)
+    
+
+# 9
+# 获取所有多头趋势股票
+# 输入一list有效股票
+# 输出一list，为所有符合从小到长均线排列从大到小的股票
+def get_in_trends(available_stocks, context):
+    # 建立需要移除的股票list，只要发现股票有两根均线不符合多头趋势，就加入删除名单并停止计算
+    to_remove = []
+    # 对于所有有效股票
+    for security in available_stocks:
+        # 获取最长ma长度
+        longest_ma = max(g.ma_lengths)
+        # 今日日期
+        date = context.current_dt
+        # 获取过去价格
+        all_past_prices = attribute_history(security,longest_ma + g.in_trend_days -1, '1d', 'close',  skip_paused = True)
+        # 对于认定趋势的每一天
+        for day in range(g.in_trend_days):
+            # 筛去尾部的-day天数据
+            if day == 0:
+                past_prices = all_past_prices
+            else:
+                past_prices = all_past_prices[:-day]
+            # 建立空均线值list 
+            mas = []
+            # 对于所有均线长度
+            for length in g.ma_lengths:
+                # 截取相应数据
+                ma_data = past_prices[-length:]
+                # 算均值
+                ma = sum(ma_data).iloc[0]/ length
+                # 计入list 
+                mas.append(ma)
+            # 从大到小排列均值list 
+            sorted_mas = sorted(mas)
+            sorted_mas.reverse()
+            # 如果排列之后和之前不
+            if mas != sorted_mas:
+                # 加入删除行列
+                to_remove.append(security)
+                # 不继续进行运算
+                break
+    log.info("9. 正排与倒排不一致的股票",to_remove)
+    for security in to_remove:
+        # 就删了
+        available_stocks.remove(security)
+    # 返回趋势股票list
+    log.info("10.除去不一致的股票后，剩余多头趋势满足均线平行强势的股票列表") 
+    log.info(available_stocks) 
+    log.info("11.已执行完get_in_trends操作")
+    return(available_stocks)
+
+
+##############################################################
+## 买入操作
+##############################################################
+
+# 10
+# 买入股票函数
+# 输入一list股票
+# 执行买入股票
+def buy_stocks(signal, context):
+
+
+    # 计算每只股票分到多少钱
+    #当signal存在时执行
+    for security in signal:
+
+        if len(context.portfolio.positions) < g.num_stocks:
+            cash_per_stock = context.portfolio.available_cash / (g.num_stocks-len(context.portfolio.positions)+g.huice_shipan)
+            # 对于信号中的每一个股票
+            # 买入
+            current_price = history(1, '1m', 'close', security).iloc[0].iloc[0]
+            required_money = current_price * 100
+            log.info("最终执行买入的股票",security,"当前价格",current_price,"所需资金",required_money,"可用资金",cash_per_stock)
+            if cash_per_stock > required_money:
+                
+                order_value(security, cash_per_stock)
+                
+        else:
+
+            log.info("已经全仓本交易日不再买入")
+
+'''
+================================================================================
+通用函数
+================================================================================
+ 
+'''           
+             
+
+def financial_statements_filter(context, security_list):
+    ### _财务指标筛选函数-开始 ###
+    #security_list = financial_data_filter_xiaoyu(security_list, valuation.pb_ratio, 4)
+    
+    #净资产收益率
+    security_list = financial_data_filter_dayu(security_list, indicator.roe, 5)
+
+    #净利润同比增长率
+    security_list = financial_data_filter_dayu(security_list, indicator.inc_net_profit_year_on_year, 5)
+    #只选择市值大于一定值的企业
+    #security_list = financial_data_filter_dayu(security_list, valuation.market_cap, 20)
+    #只选择流通市值大于一定值的企业
+    #security_list = financial_data_filter_dayu(security_list, valuation.circulating_market_cap, 50)
+    ##pe的过滤
+    
+    #security_list = financial_data_filter_qujian(security_list, valuation.pe_ratio, (0,30))
+
+    ### _财务指标筛选函数-结束 ###
+
+    # 返回列表
+    return security_list
+
+def financial_statements_filter_zz500(context, security_list):
+    ### _财务指标筛选函数-开始 ###
+    #security_list = financial_data_filter_xiaoyu(security_list, valuation.pb_ratio, 4)
+    
+    #净资产收益率
+    security_list = financial_data_filter_dayu(security_list, indicator.roe, 10)
+
+    #净利润同比增长率
+    #security_list = financial_data_filter_dayu(security_list, indicator.inc_net_profit_year_on_year, 5)
+    #只选择市值大于一定值的企业
+    #security_list = financial_data_filter_dayu(security_list, valuation.market_cap, 20)
+    #只选择流通市值大于一定值的企业
+    security_list = financial_data_filter_dayu(security_list, valuation.circulating_market_cap, 100)
+    ##pe的过滤
+    
+    #security_list = financial_data_filter_qujian(security_list, valuation.pe_ratio, (10,20))
+
+    ### _财务指标筛选函数-结束 ###
+
+    # 返回列表
+    return security_list
+
+
+def technical_indicators_filter(context, security_list):
+    ### _技术指标筛选函数-开始 ###
+    ##所有技术指标函数均已列出
+    #KDJ买入
+    #security_list = [security for security in security_list if KDJ_judge_mrxh(security, 9, 3, 3)]
+    security_list = [security for security in security_list if KDJ_J_judge_xiaoyu(security, 0, 9, 3, 3)]
+    security_list = [security for security in security_list if KDJ_judge_kongtou(security, 9, 3, 3)]
+
+
+    security_list = [security for security in security_list if MACD_DIF_judge_xiaoyu(security, -0.1, 12, 26, 26)]
+    security_list = [security for security in security_list if MACD_DEA_judge_xiaoyu(security, -0.1, 12, 26, 26)]
+    security_list = [security for security in security_list if MACD_judge_duotou(security, 12, 26, 26)]
+
+    ### _技术指标筛选函数-结束 ###
+
+    # 返回列表
+    return security_list
+def other_func_filter(context, security_list):
+    ### _其他方式筛选函数-开始 ###
+
+
+    # 返回列表
+    return security_list
+
+
+def pattern_recognition_filter(context, security_list):
+    ### _形态指标筛选函数-开始 ###
+    ### _形态指标筛选函数-结束 ###
+
+    # 返回列表
+    return security_list
+
+## 排序
+def check_stocks_sort(context,security_list,input_dict,ascending='desc'):
+    if (len(security_list) == 0) or (len(input_dict) == 0):
+        return security_list
+    else:
+        # 生成 key 的 list
+        idk = list(input_dict.keys())
+        # 生成矩阵
+        a = pd.DataFrame()
+        for i in idk:
+            b = get_sort_dataframe(security_list, i, input_dict[i])
+            a = pd.concat([a,b],axis = 1)
+        # 生成 score 列
+        a['score'] = a.sum(1,False)
+        # 根据 score 排序
+        if ascending == 'asc':# 升序
+            a = a.sort(['score'],ascending = True)
+        elif ascending == 'desc':# 降序
+            a = a.sort(['score'],ascending = False)
+        # 返回结果
+        return list(a.index)
+
+
+# 获取选股排序的 input_dict
+def get_check_stocks_sort_input_dict():
+    input_dict = {
+
+        #valuation.pe_ratio:('asc',0),
+        #indicator.roe:('desc',0),
+        indicator.inc_net_profit_year_on_year:('asc',0),
+        }
+    # 返回结果
+    return input_dict
+
+def holded_filter(context,security_list):
+    if not g.filter_holded:
+        security_list = [stock for stock in security_list if stock not in context.portfolio.positions.keys()]
+    # 返回结果
+    return security_list
+
+#def after_trading_end(context):
+#   initialize
+#  process_initialize

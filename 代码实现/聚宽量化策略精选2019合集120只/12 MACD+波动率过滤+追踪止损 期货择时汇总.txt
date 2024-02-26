@@ -1,0 +1,460 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/view/community/detail/17302
+# 标题：MACD+波动率过滤+追踪止损 期货择时汇总
+
+# 导入函数库
+from jqdata import * 
+import talib 
+from math import isnan
+import re
+
+def initialize(context):
+    # 设置参数
+    set_parameter(context)
+    # 不设定基准，在多品种的回测当中基准没有参考意义
+    set_benchmark('511880.XSHG')
+    # 开启动态复权模式(真实价格)
+    set_option('use_real_price', True)
+    # 过滤掉order系列API产生的比error级别低的log
+    log.set_level('order', 'error')
+    
+    ### 期货相关设定 ###
+    # 设定账户为金融账户
+    set_subportfolios([SubPortfolioConfig(cash=context.portfolio.starting_cash, type='futures')])
+    # 期货类每笔交易时的手续费是：买入时万分之01,卖出时万分之1,平今仓为万分之1
+    set_order_cost(OrderCost(open_commission=0.0001, close_commission=0.0001,close_today_commission=0.0001), type='index_futures')
+    # 设定保证金比例
+    set_option('futures_margin_rate', 0.15)
+    # 设置滑点双边万分之2
+    set_slippage(PriceRelatedSlippage(0.0002),type='future')
+    
+    # 开盘前运行
+    run_daily( before_market_open, time='09:00', reference_security=get_future_code('RB'))
+    # 开盘时运行
+    run_daily(market_open, time='09:00', reference_security=get_future_code('RB'))
+    run_daily(Trade,time='09:00', reference_security=get_future_code('RB'))
+    run_daily(TrailingStop,time='09:00', reference_security=get_future_code('RB'))
+    # 收盘后运行
+    run_daily( after_market_close, time='15:30', reference_security=get_future_code('RB'))
+   
+# 参数设置函数
+def set_parameter(context):
+    
+    #######变量设置########
+    g.LastRealPrice = {} # 最新真实合约价格字典
+    g.HighPrice = {} # 各品种最高价字典（用于吊灯止损）
+    g.LowPrice = {} # 各品种最低价字典（用于吊灯止损）
+    g.TradeLots = {}  # 各品种的交易手数信息
+    g.Price_dict = {} # 各品种价格列表字典
+    g.Times = {} # 计数器（用于防止止损重入）
+
+    g.ATR = {} # ATR值字典
+    g.MACD = {} # MACD值字典
+    g.PriceArray = {} # 信号计算价格字典
+    g.Filter ={} # 过滤器金额（计算买卖条件）
+    g.MappingReal = {} # 真实合约映射（key为symbol，value为主力合约）
+    g.Highest_high_2_20 ={}
+    g.Lowest_low_2_20= {} 
+    g.CurrentPrice = {}
+    g.BuyFuture = []
+    g.SellFuture = []
+    g.dontbuy = {}
+    g.dontsellshort = {}
+    g.Signal = {}
+    g.filter_var = None
+    g.cal_var = {}
+    
+    #######参数设置########
+    g.ATRWindow = 10
+    g.Cross = 0 # 均线交叉判定信号
+    g.NATR_stop = 3 # ATR止损倍数
+    g.fastperiod = 3
+    g.slowperiod = 7
+    g.signalperiod = 7
+    # 交易的期货品种信息
+    g.instruments = ['AL','NI','CU','PB','AG',
+                    'RU','MA','PP','TA','L','V',
+                    'M','P','Y','C','CS','JD','SR',
+                    'HC','J','I','SF','RB','ZC']
+#                    'ZN','SN','BU','A','CF','OI','AP','JM','FG',]
+    # 价格列表初始化
+    set_future_list(context)
+
+
+def set_future_list(context):
+    for ins in g.instruments:
+        idx = get_future_code(ins)
+        dom = get_dominant_future(ins)
+        # 填充映射字典
+        g.MappingReal[ins] = dom
+        #设置主力合约已上市的品种基本参数
+        if dom == '':
+            pass
+        else:
+            g.HighPrice[dom] = False
+            g.LowPrice[dom] = False
+            g.Highest_high_2_20[dom] = False
+            g.Lowest_low_2_20[dom]=False  
+            g.Times[dom] = 0
+            
+## 开盘前运行函数
+def before_market_open(context):
+    # 输出运行时间
+    log.info('函数运行时间(before_market_open)：'+str(context.current_dt.time()))
+    send_message('开始交易')
+    
+    # 过滤无主力合约的品种，传入并修改期货字典信息
+    for ins in g.instruments:
+        dom = get_dominant_future(ins)
+        if dom == '':
+            pass
+        else:
+            # 判断是否执行replace_old_futures
+            if dom == g.MappingReal[ins]:
+                pass
+            else:
+                replace_old_futures(context,ins,dom)
+                g.HighPrice[dom] = False
+                g.LowPrice[dom] = False
+                g.Highest_high_2_20[dom] = False
+                g.Lowest_low_2_20[dom]=False  
+                g.Times[dom] = 0
+                g.MappingReal[ins] = dom
+
+
+## 开盘时运行函数
+def market_open(context):
+    
+    # 以下是主循环
+    g.filter_var = []
+    for ins in g.instruments:
+        # 过滤空主力合约品种
+        if g.MappingReal[ins] != '':
+            RealFuture = g.MappingReal[ins]
+            # 获取当月合约交割日期
+            end_date = get_CCFX_end_date(RealFuture)
+            # 当月合约交割日当天不开仓
+            if (context.current_dt.date() == end_date):
+                return
+            else:
+                g.LastRealPrice[RealFuture] = attribute_history(RealFuture,1,'1d',['close'])['close'][-1]
+                # 获取价格list
+                g.PriceArray[RealFuture] = attribute_history(RealFuture,50,'1d',['close','open','high','low'])
+                g.CurrentPrice[RealFuture] = g.PriceArray[RealFuture]['close'][-1]
+                g.ClosePrice = g.PriceArray[RealFuture]['close']
+                # 如果没有数据，返回
+                if len(g.PriceArray[RealFuture]['close']) < 50:
+                    return
+                else:
+                    #获取数组型价格信息
+                    close = np.array(g.PriceArray[RealFuture]['close'])
+                    high =  np.array(g.PriceArray[RealFuture]['high'])
+                    low = np.array(g.PriceArray[RealFuture]['low'])
+                    
+                    # 可交易品种波动率收集
+                    g.cal_var[ins] = close[-19:].var()
+                    #计算MACD
+                    g.MACD[RealFuture] = {}
+                    g.MACD[RealFuture]['diff'],g.MACD[RealFuture]['dea'],g.MACD[RealFuture]['macd'] = talib.MACD(close,g.fastperiod ,g.slowperiod,g.signalperiod)
+                    
+                    DontTrade = []
+                    # 刚刚上市的RealFuture可能出现NaN的情况，如果报错则禁止交易该品种
+                    try:
+                        # 计算ATR
+                        g.ATR[RealFuture] = talib.ATR(high,low,close, g.ATRWindow)[-1]
+                            # 跌破20日最高点，达到3ATR，禁止开仓
+                            # 设置最高价与最低价（注意：需要错一位，不能算入当前价格）
+                        g.Highest_high_2_20[RealFuture] = g.PriceArray[RealFuture]['high'][-21:-1].max()
+                        g.Lowest_low_2_20[RealFuture] = g.PriceArray[RealFuture]['low'][-21:-1].min()
+                            
+                        if(g.Highest_high_2_20[RealFuture] - g.LastRealPrice[RealFuture] > 3*g.ATR[RealFuture]):
+                            g.dontbuy[ins] = 1
+                        else:
+                            g.dontbuy[ins] = -1
+                        if(g.LastRealPrice[RealFuture] - g.Lowest_low_2_20[RealFuture] > 3*g.ATR[RealFuture]):
+                            g.dontsellshort[ins] = 1
+                        else:
+                            g.dontsellshort[ins] = -1
+                            
+                    except:
+                        print('报错')
+                        DontTrade.append(ins)
+                        
+                    if not isnan(g.MACD[RealFuture]['diff'][-1]) :
+                
+                        # 判断MACD交叉模式1
+                        '''
+                        if g.MACD[RealFuture]['diff'][-1] >0 and g.MACD[RealFuture]['dea'][-1] > 0:
+                            if g.MACD[RealFuture]['diff'][-2] < g.MACD[RealFuture]['dea'][-2] and g.MACD[RealFuture]['diff'][-1] > g.MACD[RealFuture]['dea'][-1]:
+                                g.Cross = 1
+                        elif g.MACD[RealFuture]['diff'][-1] < 0 and g.MACD[RealFuture]['dea'][-1] < 0:
+                            if g.MACD[RealFuture]['diff'][-2] > g.MACD[RealFuture]['dea'][-2] and g.MACD[RealFuture]['diff'][-1] < g.MACD[RealFuture]['dea'][-1]:
+                                g.Cross = -1
+                        else:
+                            g.Cross = 0
+                        '''
+                        
+                        # 判断MACD均线交叉模式2
+                        if g.MACD[RealFuture]['diff'][-1] > 0 and g.MACD[RealFuture]['dea'][-1] > 0:
+                            g.Cross = 1
+                        elif g.MACD[RealFuture]['diff'][-1] < 0 and g.MACD[RealFuture]['dea'][-1] < 0:
+                            g.Cross = -1
+                        else:
+                            g.Cross = 0
+                            
+                    # 判断交易信号
+                    if  g.Cross == 1 :
+                        g.Signal[ins] = 1
+                    elif g.Cross == -1 :
+                        g.Signal[ins] = -1
+                    else:
+                        g.Signal[ins] = 0
+                    
+                    # 计数器+1
+                    if RealFuture in g.Times.keys():
+                        g.Times[RealFuture] += 1 
+                    else:
+                        g.Times[RealFuture] = 0
+    
+    # 波动率过滤
+    if len(g.cal_var.keys()) > 0:            
+        var_list = array([g.cal_var[i] for i in g.cal_var.keys()])
+        mean_var = var_list.mean()
+        Zscore_var = var_list.var()
+        Zvar_mean = ((var_list - mean_var) / Zscore_var).mean()
+        g.fliter_var = [i for i in g.cal_var.keys() if ((g.cal_var[i] - mean_var) / Zscore_var) > Zvar_mean]
+    
+
+
+## 收盘后运行函数
+def after_market_close(context):
+    log.info(str('函数运行时间(after_market_close):'+str(context.current_dt.time())))
+    
+    # 得到当天所有Order记录,并将成交价格写入price里
+    for RealFuture in g.BuyFuture:
+        Order = get_orders(security=RealFuture) 
+        for i in Order.keys():
+            g.HighPrice[RealFuture] = Order[i].price
+    for RealFuture in g.SellFuture:
+        Order = get_orders(security=RealFuture) 
+        for i in Order.keys():
+            g.LowPrice[RealFuture] = Order[i].price
+    log.info('一天结束')
+    log.info('##############################################################')
+
+
+## 交易模块 
+def Trade(context):
+    
+    # 记录今日交易的品种列表
+    g.BuyFuture,g.SellFuture = [],[]
+    # g.WaitingListLong,g.WaitingListShort = [],[]
+    g.BuyList,g.SellList = [],[]
+    # 二次校正模块，可将后面两个for循环去除
+    #g.BuyList,g.SellList = rank_futures(context)
+    for ins in g.instruments:
+        try:
+            # 利用try结构防止品种刚上市，由于market_open中过滤后，没有加入到字典key里的情况
+            if g.Signal[ins] == 1 and g.dontbuy[ins] != 1 and ins not in g.filter_var:
+                g.BuyList.append(ins)
+            elif g.Signal[ins] == -1 and g.dontsellshort[ins] != 1 and ins not in g.filter_var:
+                g.SellList.append(ins) 
+        except:
+            print('判定未执行',ins)
+    #  打印成交列表    
+    print(g.BuyList,g.SellList) 
+    
+    # 计算交易手数
+    for ins in g.instruments:
+        RealFuture = get_dominant_future(ins)
+        if RealFuture == '':
+            pass
+        else:
+            if len(g.BuyList)+len(g.SellList) == 0:
+                g.TradeLots[RealFuture] = get_lots(context.portfolio.starting_cash/10,ins)
+            else:
+                g.TradeLots[RealFuture] = get_lots(context.portfolio.starting_cash/(len(g.BuyList)+len(g.SellList)),ins)
+               
+    for ins in g.instruments:
+        try:
+            RealFuture = g.MappingReal[ins]
+            if RealFuture in g.LastRealPrice.keys():
+                if ins in g.BuyList  and context.portfolio.long_positions[RealFuture].total_amount == 0:
+                    if context.portfolio.long_positions[RealFuture].total_amount != 0:
+                        log.info('空头有持仓：%s'%(RealFuture))
+                    order_target(RealFuture,0,side='short')
+                    order_target(RealFuture,g.TradeLots[RealFuture],side='long')
+                    g.BuyFuture.append(RealFuture)
+                    log.info('正常买多合约：%s'%(RealFuture))
+                elif ins in g.SellList and context.portfolio.short_positions[RealFuture].total_amount == 0:
+                    if context.portfolio.short_positions[RealFuture].total_amount != 0:
+                        log.info('多头有持仓：%s'%(RealFuture))
+                    order_target(RealFuture,0,side ='long')
+                    order_target(RealFuture,g.TradeLots[RealFuture],side='short')
+                    g.SellFuture.append(RealFuture)
+                    log.info('正常卖空合约：%s'%(RealFuture))
+                elif ins not in g.BuyList and RealFuture in context.portfolio.long_positions.keys():
+                    log.info('正常平多：%s'%(RealFuture))
+                    order_target(RealFuture,0,side ='long')
+                elif ins not in g.SellList and RealFuture in context.portfolio.short_positions.keys():
+                    order_target(RealFuture,0,side ='short') 
+                    log.info('正常平空：%s'%(RealFuture))
+        except:
+            print('交易未执行')
+            pass
+        
+        
+# 追踪止损模块（ATR止损）
+def TrailingStop(context):
+    
+    for ins in g.instruments:
+        RealFuture = g.MappingReal[ins]  
+        if RealFuture in g.LastRealPrice.keys():
+            
+            # 因为有时追踪止损模块并非和Trade同时启动，所以止损相关值需要再次计算
+            # 获取止损所需价格
+            g.PriceArray[RealFuture] = attribute_history(RealFuture,50,'1d',['close','open','high','low','volume','avg'])
+            #设置最高价与最低价（注意：需要错一位，不能算入当前价格）
+            g.Highest_high_2_20[RealFuture] = g.PriceArray[RealFuture]['high'][-21:-1].max()
+            g.Lowest_low_2_20[RealFuture] = g.PriceArray[RealFuture]['low'][-21:-1].min()
+            g.LastRealPrice[RealFuture] = attribute_history(RealFuture,1,'1m',['close'])['close'][-1]
+            # 如果没有数据，返回
+            if len(g.PriceArray[RealFuture]) < 1:
+                return
+            else: 
+                # 获取ATR
+                g.close = np.array(g.PriceArray[RealFuture]['close'])
+                g.high = np.array(g.PriceArray[RealFuture]['high'])
+                g.low = np.array(g.PriceArray[RealFuture]['low'])
+                g.ATR[RealFuture] = talib.ATR(g.high,g.low,g.close, g.ATRWindow)[-1]
+
+            # 记录多空仓位
+            long_positions = context.portfolio.long_positions
+            short_positions = context.portfolio.short_positions
+
+            # 通过for循环逐一平仓（多头）
+            if RealFuture in long_positions.keys():
+                if long_positions[RealFuture].total_amount > 0:
+                    if g.HighPrice[RealFuture]:
+                        print('函数运行：%s'%(RealFuture))
+                        g.HighPrice[RealFuture] = max(max(g.HighPrice[RealFuture],g.Highest_high_2_20[RealFuture]), g.LastRealPrice[RealFuture])
+                        # g.HighPrice[RealFuture] = max(g.HighPrice[RealFuture], g.LastRealPrice[RealFuture])
+                        if g.LastRealPrice[RealFuture]  < g.HighPrice[RealFuture]-g.NATR_stop*g.ATR[RealFuture]:
+                        # if g.LastRealPrice[RealFuture]  < context.portfolio.long_positions[RealFuture].avg_cost-g.NATR_stop*g.ATR[RealFuture]:
+                            log.info('多头止损:\t' +  RealFuture)
+                            order_target(RealFuture,0,side = 'long')
+                    else:
+                        print('函数未运行：%s'%(RealFuture))
+            # 通过for循环逐一平仓（空头）
+            if RealFuture in short_positions.keys():
+                if short_positions[RealFuture].total_amount > 0:
+                    if g.LowPrice[RealFuture]:
+                        print('函数运行：%s'%(RealFuture))
+                        g.LowPrice[RealFuture] = min(min(g.LowPrice[RealFuture],g.Lowest_low_2_20[RealFuture]), g.LastRealPrice[RealFuture])
+                        # g.LowPrice[RealFuture] = min(g.LowPrice[RealFuture], g.LastRealPrice[RealFuture])
+                        if g.LastRealPrice[RealFuture]  > g.LowPrice[RealFuture]+g.NATR_stop*g.ATR[RealFuture]:
+                        # if g.LastRealPrice[RealFuture]  > context.portfolio.short_positions[RealFuture].avg_cost+g.NATR_stop*g.ATR[RealFuture]:
+                            log.info('空头止损:\t' + RealFuture)
+                            order_target(RealFuture,0,side = 'short')
+                else:
+                        print('函数未运行：%s'%(RealFuture))
+
+
+# 移仓模块：当主力合约更换时，平当前持仓，更换为最新主力合约        
+def replace_old_futures(context,ins,dom):
+    
+    LastFuture = g.MappingReal[ins]
+    
+    if LastFuture in context.portfolio.long_positions.keys():
+        lots_long = context.portfolio.long_positions[LastFuture].total_amount
+        order_target(LastFuture,0,side='long')
+        order_target(dom,lots_long,side='long')
+        print('主力合约更换，平多仓换新仓')
+    
+    if LastFuture in context.portfolio.short_positions.keys():
+        lots_short = context.portfolio.short_positions[LastFuture].total_amount
+        order_target(LastFuture,0,side='short')
+        order_target(dom,lots_short,side='short')
+        print('主力合约更换，平空仓换新仓')
+
+        
+# 获取3项关键属性
+def future_basic_info(future):
+ 
+    match = re.match(r"(?P<underlying_symbol>[A-Z]{1,})(?P<delivery_month>[0-9]{1,})", future)
+    if not match:
+        raise ValueError("未知期货标的：{}".format(future))
+    
+    if "9999" in future or "8888" in future:
+        future = get_dominant_future(match.groupdict()["underlying_symbol"])
+        match = re.match(r"(?P<underlying_symbol>[A-Z]{1,})(?P<delivery_month>[0-9]{1,})", future)
+            
+    if future.endswith("XZCE"):
+        future = match.groupdict()["underlying_symbol"] + match.groupdict()["delivery_month"][1:]
+        
+    q = query(jy.Fut_ContractMain).filter(jy.Fut_ContractMain.ContractCode == future.split(".")[0])
+    result = jy.run_query(query_object=q).to_dict("record")
+    if result:
+        result = result.pop()
+        min_point_match = re.match("(?P<value>^[0-9]+([.]{1}[0-9]+){0,1})", str(result["LittlestChangeUnit"]))
+        if min_point_match:
+            min_point = min_point_match.groupdict(nan)["value"]
+        else:
+            min_point = nan
+        
+        return {"ContractUnit": result["CMValue"],
+               "PriceScale": float(str(min_point)[:-1] + "1") if float(min_point) < 1 else 1,
+               "MinPoint": float(min_point)}
+    else:
+        return {"ContractUnit": nan,
+                "PriceScale": nan,
+                "MinPoint": nan}
+                
+                
+# 获取交易手数函数（ATR倒数头寸）
+def get_lots(cash,symbol):
+    RealFuture = get_dominant_future(symbol)
+    # 获取价格list
+    Price_dict = attribute_history(RealFuture,10,'1d',['open'])
+    # 如果没有数据，返回
+    if len(Price_dict) == 0: 
+        return
+    else:
+        open_future = Price_dict.iloc[-1]
+    # 返回手数
+    if RealFuture in g.ATR.keys():
+        return cash*0.02/(g.ATR[RealFuture]*future_basic_info(RealFuture)['ContractUnit'])
+    else:# 函数运行之初会出现没将future写入ATR字典当中的情况
+        return cash*0.0001/future_basic_info(RealFuture)['ContractUnit']
+
+        
+# 获取当天时间正在交易的期货主力合约函数
+def get_future_code(symbol):
+    future_code_list = {'A':'A8888.XDCE', 'AG':'AG8888.XSGE', 'AL':'AL8888.XSGE', 'AU':'AU8888.XSGE',
+                        'B':'B8888.XDCE', 'BB':'BB8888.XDCE', 'BU':'BU8888.XSGE', 'C':'C8888.XDCE', 
+                        'CF':'CF8888.XZCE', 'CS':'CS8888.XDCE', 'CU':'CU8888.XSGE', 'ER':'ER8888.XZCE', 
+                        'FB':'FB8888.XDCE', 'FG':'FG8888.XZCE', 'FU':'FU8888.XSGE', 'GN':'GN8888.XZCE', 
+                        'HC':'HC8888.XSGE', 'I':'I8888.XDCE', 'IC':'IC8888.CCFX', 'IF':'IF8888.CCFX', 
+                        'IH':'IH8888.CCFX', 'J':'J8888.XDCE', 'JD':'JD8888.XDCE', 'JM':'JM8888.XDCE', 
+                        'JR':'JR8888.XZCE', 'L':'L8888.XDCE', 'LR':'LR8888.XZCE', 'M':'M8888.XDCE', 
+                        'MA':'MA8888.XZCE', 'ME':'ME8888.XZCE', 'NI':'NI8888.XSGE', 'OI':'OI8888.XZCE', 
+                        'P':'P8888.XDCE', 'PB':'PB8888.XSGE', 'PM':'PM8888.XZCE', 'PP':'PP8888.XDCE', 
+                        'RB':'RB8888.XSGE', 'RI':'RI8888.XZCE', 'RM':'RM8888.XZCE', 'RO':'RO8888.XZCE', 
+                        'RS':'RS8888.XZCE', 'RU':'RU8888.XSGE', 'SF':'SF8888.XZCE', 'SM':'SM8888.XZCE', 
+                        'SN':'SN8888.XSGE', 'SR':'SR8888.XZCE', 'T':'T8888.CCFX', 'TA':'TA8888.XZCE', 
+                        'TC':'TC8888.XZCE', 'TF':'TF8888.CCFX', 'V':'V8888.XDCE', 'WH':'WH8888.XZCE', 
+                        'WR':'WR8888.XSGE', 'WS':'WS8888.XZCE', 'WT':'WT8888.XZCE', 'Y':'Y8888.XDCE', 
+                        'ZC':'ZC8888.XZCE', 'ZN':'ZN8888.XSGE'}
+    try:
+        return future_code_list[symbol]
+    except:
+        return 'WARNING: 无此合约'
+
+    
+# 获取金融期货合约到期日
+def get_CCFX_end_date(fature_code):
+    # 获取金融期货合约到期日
+    return get_security_info(fature_code).end_date
+

@@ -1,0 +1,247 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/23008
+# 标题：利用股息率长线选股【超稳】
+# 作者：一袋棕丝
+
+'''
+原理：泸深指数成份股作为预选股票池，
+    1、找出三年都有分红的标的
+    2、计算股息率：当年现金分红金额除以市值
+    3、因为随着股价升高，第2点中计算的股息率必然降底，也就是持仓成本高了
+    4、保留对股息率大于0.02%的标的，进行排序，保留前10名
+    5、如果持创的股标还是在10名排序里面就不改变，否则卖出。
+    6、如果持仓数目小于5只，就从第一名开始逐个买入。
+    长线投资，可以每月调一次仓，也可以设置每周调一次仓
+持仓原则：
+'''
+# 导入函数库
+from jqdata import *
+import pandas as pd
+import numpy as np
+
+def set_param(context):
+    g.bten=[]
+    g.bfive=[]
+    #Start 策略相关参数
+    g.stock_num = 3 #设置最多持仓多少个标的
+    g.adjust_cycle_mounthly = 1 #调仓周期1:每月,0:每周
+    
+    #三年内股息率在连续增长
+    g.gxl_level1 = 0.02 #前一年的股息率要高于这个阈值才保留（原参数是0.02）
+    g.gxl_level2 = 0.75 #前两年的股息率要达到前一年股息率的这个阈值才保留（原参数是0.8）
+    g.gxl_level3 = 0.60 #前三年的股息率要达到前一年股息率的这个阈值才保留（原参数是0.64）
+    g.gxl_3year_persent = 0.1 #三年现金分红要大于市值一定比便的才保留（原参数是0.1） 
+    g.check_position_everyday = 1 #1:每天都检测持仓股是否偏离持股原则,0:不处理
+    g.buy_new_stock_after_check = 0 #开启check_position_everyday后，如果卖出了不符合要求的票，马上入手新的票
+    g.last_check_stocks_date = context.current_dt #最后一次检测股息率后调仓的时间
+    #End 策略相关参数
+    g.fin=pd.DataFrame()
+    # 设定沪深300作为基准
+    set_benchmark('000300.XSHG')
+     #显示所有列
+    pd.set_option('display.max_columns', None)
+    #显示所有行
+    pd.set_option('display.max_rows', None)
+    #设置value的显示长度为100，默认为50
+    pd.set_option('max_colwidth',100)
+    # 开启动态复权模式(真实价格)
+    set_option('use_real_price', True)
+    # 过滤掉order系列API产生的比error级别低的log
+    log.set_level('order', 'error')
+    
+    ### 股票相关设定 ###
+    # 股票类每笔交易时的手续费是：买入时佣金万分之三，卖出时佣金万分之三加千分之一印花税, 每笔交易佣金最低扣5块钱
+    set_order_cost(OrderCost(close_tax=0.001, open_commission=0.0003, close_commission=0.0003, min_commission=5), type='stock')
+
+# 初始化函数，设定基准等等
+def initialize(context):
+    set_option("avoid_future_data", True)
+    set_param(context)
+    run_daily(main2,'every_bar')
+    if g.adjust_cycle_mounthly==1:
+        run_monthly(main,1,time='9:50')
+    else:
+        run_weekly(main,1,time='9:50')
+    
+def main2(context):
+    #判断持仓股是不是到了最高价，如果是的话就卖出
+    if g.check_position_everyday==1:
+        do_adjust = False
+        for sell_code in context.portfolio.long_positions.keys():
+            q=query(
+                    income.statDate,
+                    income.code
+                ).filter(
+                    income.code.in_([sell_code])
+                    )
+            df=get_fundamentals(q)
+            one_year,two_year,three_year,market_cap = cal_gxl(sell_code,df.loc[0].statDate)        
+            if not check_stock_hold_condition(one_year,two_year,three_year,market_cap):
+                #卖掉
+                do_adjust = True
+                log.info('中间满足志出条件:%s,gxl1=%f,gxl2=%f,gxl3=%f'%(sell_code,one_year/market_cap,two_year/market_cap,three_year/market_cap))
+                order_target_value(sell_code,0)
+        if g.buy_new_stock_after_check==1 and do_adjust:
+            main(context)
+    curr_available_cash = context.portfolio.available_cash
+    curr_total_value = context.portfolio.total_value
+    # 计算帐户仓位比例
+    curr_cw = 1 - curr_available_cash / curr_total_value
+    # 输出帐户仓位图表
+    record(持仓比例 = curr_cw)
+    
+def main(context):
+    if g.last_check_stocks_date == context.current_dt:
+        return
+    g.last_check_stocks_date = context.current_dt
+    #1、设置大股票池,返回df，包括code、statDate
+    df=getBigStocks()
+    #2、财报质量控制,返回code,lrzl,yszzl,zcfzl,ejdtb,ejdhb
+    df=controlReport(context,df)
+    #3、设置下单列表
+    setSmallStocks(df)
+    #4、下单
+    orderStock(context,df)
+
+#1、设置大股票池,返回df，包括code、statDate    
+def getBigStocks():
+    stocks = get_index_stocks('000300.XSHG')
+    q=query(
+               income.statDate,
+               income.code
+             ).filter(
+                #income.net_profit>100000000,
+                valuation.pe_ratio>0,
+                income.code.in_(stocks)
+                )
+    rets=get_fundamentals(q)
+    return rets
+
+def controlReport(context,df):
+    df_qc=pd.DataFrame()
+    for i in range(0,len(df)):
+        statDate=df.loc[i].statDate
+        code=df.loc[i].code
+        #统计分红
+        one_year,two_year,three_year,market_cap = cal_gxl(code,statDate)
+        #统计20周期内的张幅用于显示
+        close_data = attribute_history(code, 20, '1d', ['close'],df=False)['close']#获取大概一个内的涨幅
+        zf = round((close_data[-1] / close_data[0] -1)*100,2)
+
+        if check_stock_hold_condition(one_year,two_year,three_year,market_cap):
+            s_info = get_security_info(code)
+            cc=pd.DataFrame([[code,s_info.display_name,close_data[-1],zf,one_year/market_cap,two_year/market_cap,three_year/market_cap]],columns=['code','name','price','zf %','gxl','gxl2','gxl3']) 
+            df_qc=df_qc.append(cc,ignore_index=True)     
+    return df_qc.reset_index(drop=True)
+
+def setSmallStocks(df):    
+    if df.shape[0]<=max(10,g.stock_num*2): 
+        log.info("\n\n有%d符合要求，不足%d个，所以不持仓"%(df.shape[0],g.stock_num*2))
+        log.info("符合条件前10:\n%s"%(df.head(10)))
+        g.bten=[]
+        g.bfive=[]
+        return 
+    str_log = "\n\n\n有%d符合要求"%(df.shape[0])
+    #log.info("\n\n\n有%d符合要求"%(df.shape[0]))
+    df=df.sort_values(by='gxl',ascending=False).head(g.stock_num*16)
+    df.reset_index(drop=True, inplace=True)
+    #log.info("符合条件前10:\n%s"%(df.head(10)))
+    str_log += "\n符合条件前10:\n%s"%(df.head(10))
+    #if len(df)<g.stock_num*4:
+    #    df=df.head(len(df) -g.stock_num*2)
+    df=df.sort_values(by='gxl2',ascending=False).head(g.stock_num*8)
+    df=df.sort_values(by='gxl3',ascending=False).head(g.stock_num*4)
+    df=df.sort_values(by='gxl',ascending=False).head(g.stock_num*2)
+    #log.info("最终入选:\n%s"%(df.head(g.stock_num*2)))
+    str_log += "\n最终入选:\n%s"%(df.head(g.stock_num*2))
+    log.info(str_log)
+    #
+    g.bten=list(df.head(g.stock_num*2)['code'])
+    g.bfive=list(df.head(g.stock_num)['code'])
+    #moreinfo(df)
+def orderStock(context,df):    
+    bfive=g.bfive
+    bten=g.bten
+    
+    do_adjust = False
+    all_value=context.portfolio.total_value
+    for sell_code in context.portfolio.long_positions.keys():
+        if sell_code not in bten:
+            #卖掉
+            do_adjust = True
+            log.info('sell all:',sell_code)
+            order_target_value(sell_code,0)
+        #else:
+        #    log.info('sell part:'+sell_code)
+        #    order_target_value(sell_code,all_value/g.stock_num)
+            
+    for buy_code in bfive:
+        if buy_code not in context.portfolio.long_positions.keys():
+            cash_value=context.portfolio.available_cash
+            buy_value=all_value/g.stock_num    
+            if cash_value > buy_value/2 :
+                do_adjust = True
+                log.info('buy:'+buy_code+'   ' +str(buy_value))
+                order_target_value(buy_code,buy_value)
+    if do_adjust:
+        send_message("今日计算结果:\n"+str(df.head(g.stock_num*2)))                   
+def  moreinfo(df):
+    code=list(df.code)   
+    compinfo=finance.run_query(query(finance.STK_COMPANY_INFO.code,finance.STK_COMPANY_INFO.short_name,finance.STK_COMPANY_INFO.industry_id
+        ).filter(finance.STK_COMPANY_INFO.code.in_(code)))
+    dd=pd.merge(df,compinfo)
+    log.info(dd)
+    
+    
+gxl_cache={}    
+def cal_gxl(code,statDate):
+    qcap=query(valuation.market_cap).filter(valuation.code==code)
+    market_cap=get_fundamentals(qcap).loc[0,'market_cap']*10000 
+
+    q=int(int(statDate[5:7]) / 3)
+    year=int(statDate[:4])
+    infor_key = code+"_"+statDate[:4]+"_"+str(q)
+    if infor_key in gxl_cache:
+        d = gxl_cache[infor_key] 
+        return d[0],d[1],d[2],market_cap
+
+    statqs=[]
+    for kk in range(0,12):
+        statq=str(year) + 'q' + str(q)
+        statqs.append(statq)
+        q=q -1
+        if q==0 : 
+            q=4
+            year= year - 1
+    #只看现金分红
+    gx=finance.run_query(query(finance.STK_XR_XD.bonus_amount_rmb,finance.STK_XR_XD.report_date).filter(
+        finance.STK_XR_XD.code==code,
+        finance.STK_XR_XD.report_date<=statDate
+        ).order_by(finance.STK_XR_XD.report_date.desc()).limit(12))   
+    gx=gx.fillna(0)
+    #统计分红
+    one_year=0.0
+    two_year=0.0
+    three_year=0.0
+    for j in range(0,len(gx)):
+        report_date=gx.loc[j].report_date
+        if type(report_date) is str:
+            report_date = datetime.date(int(report_date[0:4]),int(report_date[5:7]),int(report_date[8:10]))                
+        q=report_date.month//3
+        year=report_date.year
+        statq=str(year) + 'q' + str(q)
+        if statq in (statqs[0],statqs[1],statqs[2],statqs[3]):
+            one_year=one_year+gx.loc[j].bonus_amount_rmb
+        if statq in (statqs[4],statqs[5],statqs[6],statqs[7]):
+            two_year=two_year+gx.loc[j].bonus_amount_rmb
+        if statq in (statqs[8],statqs[9],statqs[10],statqs[11]):
+            three_year=three_year+gx.loc[j].bonus_amount_rmb
+    gxl_cache[infor_key] = [one_year,two_year,three_year]
+    return one_year,two_year,three_year,market_cap
+
+
+def check_stock_hold_condition(one_year,two_year,three_year,market_cap):
+    comp_value=market_cap*g.gxl_level1
+    return one_year>comp_value and two_year>comp_value*g.gxl_level2 and three_year>comp_value*g.gxl_level3 and (one_year+two_year+three_year)>market_cap*g.gxl_3year_persent
+ 

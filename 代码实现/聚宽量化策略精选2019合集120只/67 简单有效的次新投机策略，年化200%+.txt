@@ -1,0 +1,243 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/20387
+# 标题：简单有效的次新投机策略，年化200%+
+# 作者：剑走天涯1986
+
+# 本策略请选择 python 2 下回测，选择 分钟 。
+
+
+import numpy
+import talib
+import urllib2
+
+def initialize(context):
+    set_option("avoid_future_data", True)
+    set_commission(PerTrade(buy_cost=0.0003, sell_cost=0.0013, min_cost=5))
+    set_option('use_real_price', True)
+    set_benchmark('399678.XSHE')
+    g.buy_stock_count = 4
+    g.index = '399678.XSHE'
+    g.black_stock = {}
+    g.trade_stop_day = 0
+    g.index_growth_rate = 0.005
+    
+def before_trading_start(context):
+    if context.current_dt.year < 2015 or (context.current_dt.year == 2015 and context.current_dt.month < 7):
+        g.index = '399006.XSHE'
+    else:
+        g.index = "399678.XSHE"
+        
+def handle_data(context, data):
+    hour = context.current_dt.hour
+    minute = context.current_dt.minute
+    if hour == 14 and minute == 00:
+        is_trade,buy_stocks = check_trade_status(context, data)
+        if is_trade:
+            adjust_position(context, data, buy_stocks[:g.buy_stock_count])
+        else:
+            clear_position(context)
+            
+def check_trade_status(context,data):
+    trade_status = []
+    #检测选中个股
+    buy_stocks = select_stocks(context,data, 10)
+    rise_count = 0
+    for stock in buy_stocks:
+        yes_index = get_current_data()[stock].day_open
+        newest_index = get_close_price(stock, 1, '1m')
+        if newest_index > yes_index:
+            rise_count = rise_count + 1
+    trade_status.append(rise_count < len(buy_stocks)/2)
+    
+    #当日涨跌幅
+    newest_index = get_close_price(g.index, 1, '1m')
+    open_index = get_current_data()[g.index].day_open
+    yes_index = get_close_price(g.index, 1)
+    if newest_index < yes_index:
+        trade_status.append(newest_index < open_index)
+        
+    #10日均线
+    indexs = history(50, '1d', 'close', g.index, df = False, skip_paused = True)
+    indexs = list(indexs[g.index])
+    indexs.append(newest_index)
+    avg_10_index = sum(indexs[-10:])/10
+    trade_status.append(newest_index < avg_10_index)
+    
+    #macd
+    macdDIFF, macdDEA, macd = MACD_CN(np.array(indexs), 12, 26, 9)
+    trade_status.append(macdDIFF[-1] < macdDIFF[-2])
+    
+    #10日涨跌
+    gr_index = get_growth_rate(g.index, 20)
+    trade_status.append(gr_index < g.index_growth_rate)
+    
+    if sum(trade_status) >=3:
+        return False,[]
+    else:
+        return True,buy_stocks
+    
+def filter_paused_and_st_stock(stock_list):
+    current_data = get_current_data()
+    return [stock for stock in stock_list if not current_data[stock].paused 
+    and not current_data[stock].is_st and 'ST' not in current_data[stock].
+    name and '*' not in current_data[stock].name and '退' not in current_data[stock].name]
+    
+def filter_gem_stock(context, stock_list):
+    return [stock for stock in stock_list  if stock[0:3] != '300']
+
+def filter_black_stock(stock_list):
+    return [stock for stock in stock_list  if stock not in g.black_stock] 
+    
+def select_stocks(context,data, count):
+    q = query(valuation.code, valuation.circulating_market_cap).order_by(
+            valuation.circulating_market_cap.asc()).filter(
+            valuation.circulating_market_cap <= 100).limit(100)
+    df = get_fundamentals(q)
+    stock_list = list(df['code'])
+    stock_list = filter_paused_and_st_stock(stock_list)
+    stock_list = filter_gem_stock(context, stock_list)
+    #stock_list = filter_black_stock(stock_list)
+    tmpList = []
+    for stock in stock_list :
+        days_public=(context.current_dt.date() - get_security_info(stock).start_date).days
+        if days_public < 365:
+                tmpList.append(stock)
+    stock_list = tmpList
+    filter_stocks = []
+    last_prices = history(1, '1m', 'close', security_list=stock_list)
+    curr_data = get_current_data()
+    for stock in stock_list:
+        if last_prices[stock][-1] < curr_data[stock].high_limit:
+            if last_prices[stock][-1] > curr_data[stock].low_limit:
+                filter_stocks.append(stock)
+    stock_list = filter_stocks
+    
+    stock_list = stock_list[:count]  
+    return stock_list;
+
+def adjust_position(context,data, buy_stocks):
+    for stock in context.portfolio.positions.keys():
+        last_prices = history(1, '1m', 'close', security_list=context.portfolio.positions.keys())
+        if stock not in buy_stocks:
+            curr_data = get_current_data()
+            if last_prices[stock][-1] < curr_data[stock].high_limit:
+                total_minute = get_today_minute(context)
+                today = attribute_history(stock, 1, unit=str(total_minute) + 'm',fields=('high','close'))
+                last_minute_price = history(1, '1m', 'close', security_list=stock)[stock][-1]
+                yes_price = history(1, '1d', 'close', security_list=stock)[stock][-1]
+                if today['close'][-1] > yes_price and today['high'][-1]/yes_price - today['close'][-1]/yes_price <= 0.02:
+                    continue
+                else:
+                    position = context.portfolio.positions[stock]
+                    close_position(context, position)
+    for stock in buy_stocks:
+        position_count = len(context.portfolio.positions)
+        if g.buy_stock_count > position_count:
+            value = context.portfolio.cash / (g.buy_stock_count - position_count)
+            if stock not in context.portfolio.positions:
+                open_position(context,stock, value)
+                
+def get_today_minute(context):
+    total_minute = 0
+    if context.current_dt.hour <= 11:
+        total_minute = (context.current_dt.hour - 9)*60 - 30 + context.current_dt.minute
+    else:
+        total_minute = 120 + (context.current_dt.hour - 13)*60 + context.current_dt.minute
+    return total_minute
+                
+def get_ma(stock, nMa, days):
+    ma_list = []
+    last_prices = history(nMa + days, '1d', 'close', security_list=stock)[stock]
+    for i in range(nMa, nMa + days):
+        ma = sum(last_prices[i-nMa:i])
+        ma_list.append(ma)
+    return ma_list
+    
+# 获取股票n日以来涨幅，根据当前价计算
+# n 默认20日
+def get_growth_rate(security, n=20):
+    lc = get_close_price(security, n)
+    #c = data[security].close
+    c = get_close_price(security, 1, '1m')
+    
+    if not isnan(lc) and not isnan(c) and lc != 0:
+        return (c - lc) / lc
+    else:
+        log.error("数据非法, security: %s, %d日收盘价: %f, 当前价: %f" %(security, n, lc, c))
+        return 0
+
+# 获取前n个单位时间当时的收盘价
+def get_close_price(security, n, unit='1d'):
+    return attribute_history(security, n, unit, ('close'), True)['close'][0]
+        
+# 开仓，买入指定价值的证券
+# 报单成功并成交（包括全部成交或部分成交，此时成交量大于0），返回True
+# 报单失败或者报单成功但被取消（此时成交量等于0），返回False
+def open_position(context, security, value):
+    order = order_target_value_(context, security, value)
+    if order != None and order.filled > 0:
+        # 报单成功并有成交则初始化最高价
+        # cur_price = get_close_price(security, 1, '1m')
+        # g.last_high[security] = cur_price
+        return True
+    return False
+
+# 平仓，卖出指定持仓
+# 平仓成功并全部成交，返回True
+# 报单失败或者报单成功但被取消（此时成交量等于0），或者报单非全部成交，返回False
+def close_position(context, position):
+    security = position.security
+    order = order_target_value_(context, security, 0) # 可能会因停牌失败
+    if order != None:
+        if order.filled > 0:
+            # 只要有成交，无论全部成交还是部分成交，则统计盈亏
+            #g.trade_stat.watch(security, order.filled, position.avg_cost, position.price)
+            pass
+        if order.status == OrderStatus.held and order.filled == order.amount:
+            # 全部成交则删除相关证券的最高价缓存
+            # if security in g.last_high:
+            #     g.last_high.pop(security)
+            #     pass
+            # else:
+            #     log.warn("last high price of %s not found" %(security))
+            return True
+
+    return False
+
+# 清空卖出所有持仓
+def clear_position(context):
+    if len(context.portfolio.positions) > 0:
+        log.info("==> 清仓，卖出所有股票")
+        stock_weight = {}
+        for stock in context.portfolio.positions.keys():
+            if get_current_data()[stock].paused:
+                continue
+            position = context.portfolio.positions[stock]
+            if close_position(context, position):
+                stock_weight[stock[:6]] = 0
+        # if len(stock_weight) > 0:
+        #     post_trade_data(stock_weight)
+
+# 自定义下单
+# 根据Joinquant文档，当前报单函数都是阻塞执行，报单函数（如order_target_value）返回即表示报单完成
+# 报单成功返回报单（不代表一定会成交），否则返回None
+def order_target_value_(context, security, value):
+    if value == 0:
+        log.debug("Selling out %s" % (security))
+    else:
+        log.debug("Order %s to value %f" % (security, value))
+        
+    # 如果股票停牌，创建报单会失败，order_target_value 返回None
+    # 如果股票涨跌停，创建报单会成功，order_target_value 返回Order，但是报单会取消
+    # 部成部撤的报单，聚宽状态是已撤，此时成交量>0，可通过成交量判断是否有成交
+    order_ = order_target_value(security, value)
+    #g.__manager.execute(order_)
+    return order_
+    
+# 同花顺和通达信等软件中的MACD
+def MACD_CN(close, fastperiod, slowperiod, signalperiod) :
+    macdDIFF, macdDEA, macd = talib.MACDEXT(close, fastperiod=fastperiod, fastmatype=1, slowperiod=slowperiod, slowmatype=1, signalperiod=signalperiod, signalmatype=1)
+    macd = macd * 2
+    return macdDIFF, macdDEA, macd
+

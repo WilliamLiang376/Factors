@@ -1,0 +1,64 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/21406
+# 标题：LLT低延迟趋势线择时交易初探
+# 作者：董123
+# 回测可以使用 分钟 。
+
+
+import pandas as pd
+import numpy as np
+import math
+
+
+# 初始化函数
+def initialize(context):
+    set_option("avoid_future_data", True)
+    # 设置交易手续费
+    set_order_cost(OrderCost(close_tax=0.001, open_commission=0.0003, close_commission=0.0003, min_commission=5), type='stock')
+    # 设置要操作的股票或ETF                                                                                           
+    g.stocks = ['510300.XSHG']
+    # 设置alpha系数
+    g.alpha = 0.05
+    # 设置LLT数值库，将每日的LLT数值纳入
+    g.LLT = []
+    
+    # 由于LLT指标的计算需要用到前两日的LLT数值，我们这里直接用前两日的收盘价替代
+    h = attribute_history('510300.XSHG', 10, '1d', 'close')
+    g.LLT.append(h['close'].values[-2])
+    g.LLT.append(h['close'].values[-1])
+    
+  
+# 主函数每日运行
+def handle_data(context, data):
+    # 获取当前可用现金
+    cash = context.portfolio.available_cash
+    # 循环标的列表
+    a = g.alpha
+    for stock in g.stocks:
+        # 计算标的的LLT值
+        h = attribute_history(stock, 10, '1d', 'close')
+        LLT1 = g.LLT[-1]
+        LLT2 = g.LLT[-2]
+        LLT=(a-(a**2)/4)*h['close'].values[-1]+(a**2)/2*h['close'].values[-2]-(a-(3/4)*(a**2))\
+                 *h['close'].values[-3]+2*(1-a)*LLT1-(1-a)**2*LLT2
+        # 将每日获取的LLT值纳入LLT数值库
+        g.LLT.append(LLT)
+        
+        # ---交易部分---
+        # 获取目前标的持仓量
+        current_position = context.portfolio.positions[stock].total_amount
+        # 如果当日LLT切线斜率小于一定程度且标的有持仓，则卖出标的
+        if g.LLT[-1] < g.LLT[-2]*0.995 and current_position > 0:      
+            order_target_value(stock, 0)
+            # 记录这次卖出
+            log.info('selling %s' % (stock))
+        # 如果当日LLT切线斜率大于一定程度且标的没有持仓，则买入标的
+        elif g.LLT[-1] > g.LLT[-2]*1.005 and current_position <= 0:                   
+            # 买入股票
+            order_target_value(stock, cash)
+            # 记录这次买入
+            log.info('Buying %s' % (stock))
+        
+        
+        

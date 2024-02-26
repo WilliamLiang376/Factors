@@ -1,0 +1,174 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/20486
+# 标题：PEG基本面选股+RSRS沪深300指数择时
+# 作者：董123
+# 回测需要选择 python 2
+
+import statsmodels.api as sm
+from jqdata import *
+import pandas as pd
+import numpy as np
+
+
+
+# 初始化函数
+def initialize(context):
+    set_option("avoid_future_data", True)
+    set_benchmark('000300.XSHG')                  # 设置沪深300指数为基准
+    set_slippage(PriceRelatedSlippage(0.002))     # 设置滑点
+    set_option('use_real_price', True)            # 使用真实价格回测
+    log.set_level('order', 'error')               # 过滤log
+    set_order_cost(OrderCost(open_tax = 0, close_tax=0.001, close_today_commission = 0, \
+    open_commission=0.0003, close_commission=0.0003, min_commission=5), type='stock')       # 设置各项交易成本
+    run_daily(market_open, time = 'open', reference_security = '000300.XSHG')        # 每天开盘运行market_open函数
+    
+    # 设置RSRS指标中的N,M值
+    g.N = 18 
+    g.M = 60
+    
+    # 买入卖出阈值
+    g.buy = 1.5
+    g.sell = -1.5
+    
+    g.Beta = []             # 记录beta值
+    g.R = []                # 记录决定系数值
+    g.stock_num = 40        # 备买股票数量
+
+
+
+'''
+-------------------退市、停牌、ST、涨停过滤函数、去极值函数------------------
+'''
+# 过滤退市
+def delisted_filter(stock_list):
+    current_data = get_current_data()
+    stock_list = [stock for stock in stock_list if not '退' in current_data[stock].name]
+    return stock_list
+
+    
+# 过滤停牌
+def paused_filter(stock_list):
+    current_data = get_current_data()
+    stock_list = [stock for stock in stock_list if not current_data[stock].paused]
+    return stock_list
+
+
+# 过滤ST
+def st_filter(stock_list):
+    current_data = get_current_data()
+    stock_list = [stock for stock in stock_list if not current_data[stock].is_st]
+    return stock_list
+ 
+    
+# 过滤涨停
+def high_limit_filter(stock_list):
+    current_data = get_current_data()
+    stock_list = [stock for stock in stock_list if not current_data[stock].day_open == current_data[stock].high_limit]
+    return stock_list
+
+
+# MAD去极值函数
+def MAD(df,data):
+    mad = np.median(np.absolute(data - np.median(data)))
+    ma = np.median(data)
+    for i in range(len(data)):
+        if data[i] > (ma + 3*1.4826*mad) or data[i] < (ma - 3*1.4826*mad):
+            df.drop(i, inplace = True)
+    return df
+    
+
+
+# 交易函数
+def trade(context):
+    stock_list = get_index_stocks('000002.XSHG') + get_index_stocks('399107.XSHE')     # 获取全部A股上市公司
+    # 过滤停牌、退市、ST、涨停
+    filter1 = delisted_filter(stock_list)
+    filter2 = paused_filter(filter1)
+    filter3 = st_filter(filter2)
+    filter4 = high_limit_filter(filter3)
+
+    #获取过滤后的股票相关基本面数据
+    df = get_fundamentals(query(valuation.code, valuation.pe_ratio, indicator.inc_net_profit_year_on_year)
+                            .filter(valuation.code.in_(filter4)))
+    # 对相关基本面数据进行MAD去极值处理
+    df = MAD(df,df.pe_ratio)
+    df.reset_index(drop = True,inplace = True)
+    df = MAD(df,df.inc_net_profit_year_on_year)
+    df.reset_index(drop = True,inplace = True)
+                            
+    df = df[(df.pe_ratio > 0) & (df.inc_net_profit_year_on_year > 0)]
+    df = df.dropna()
+    # PEG求值
+    df['PEG'] = df['pe_ratio'] / df['inc_net_profit_year_on_year']
+    # 获取备买股票池
+    df = df.sort('PEG')[:g.stock_num]
+    df.index = df['code']
+    stock_pool = df.index
+    log.info('选出的股票是:%s' %stock_pool)
+    
+    current_data = get_current_data()
+    # 如果持有的股票不在备选股票池内，且股票没有停牌而且开盘没有跌停，将其卖出
+    for stock in context.portfolio.positions.keys():
+        if stock not in stock_pool and not current_data[stock].paused and current_data[stock].day_open != current_data[stock].low_limit:
+            order_target_value(stock, 0)
+            log.info('股票%s不在股票池内，将其卖出' %stock)
+    
+    num = 0
+    for stock in context.portfolio.positions.keys():
+        num += 1
+    
+    if num == g.stock_num:
+        return
+    else:
+        per_value = context.portfolio.available_cash / (g.stock_num - num)    # 每支备买股票分配的资金
+        for stock in stock_pool:
+            if stock not in context.portfolio.positions.keys():
+                order_target_value(stock, per_value)
+                log.info('买入%s' %stock)
+
+
+    
+# 每日开盘运行函数
+def market_open(context):
+    # RSRS指标定义
+    prices = attribute_history('000300.XSHG', g.N, '1d', ['high', 'low'])
+    highs = prices.high
+    lows = prices.low
+    x = sm.add_constant(lows)
+    model = sm.OLS(highs, x)
+    beta = model.fit().params[1]        # beta值
+    r2 = model.fit().rsquared           # 决定系数值
+    g.Beta.append(beta)
+    g.R.append(r2)
+    
+    if len(g.Beta) >= g.M:
+        # 计算标准化的RSRS指标
+        # 计算均值序列
+        section = g.Beta[-g.M:]
+        # 计算均值
+        mu = np.mean(section)
+        # 计算标准差
+        sigma = np.std(section)
+        # 计算z分
+        zscore = (section[-1] - mu) / sigma
+        # 计算优化标准分
+        zscore_optimize = zscore * g.R[-1]
+        
+        # 买入卖出
+        if zscore_optimize > g.buy:
+            trade(context)
+        elif zscore_optimize < g.sell:
+            current_data = get_current_data()
+            for stock in context.portfolio.positions.keys():
+                if not current_data[stock].paused and current_data[stock].day_open != current_data[stock].low_limit:
+                    order_target_value(stock, 0)
+                    log.info('触发卖出阈值，卖出%s' %stock)
+
+
+
+
+
+
+
+

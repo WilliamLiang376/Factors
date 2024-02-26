@@ -1,0 +1,102 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/24338
+# 标题：量价MACD组合择时——极速版
+# 作者：jqz1226
+
+# 克隆自聚宽文章：https://www.joinquant.com/post/19797
+# 标题：量价MACD组合择时-帮你把握股市中的大趋势
+# 作者：了凡川
+
+# 导入函数库
+from jqdata import *
+import talib as ta
+
+
+# 初始化函数，设定基准等等
+def initialize(context):
+    set_option("avoid_future_data", True)
+    # 设定沪深300作为基准
+    set_benchmark('000300.XSHG')
+    # 开启动态复权模式(真实价格)
+    set_option('use_real_price', True)
+
+    # 过滤掉order系列API产生的比error级别低的log
+    log.set_level('order', 'error')
+
+    # 股票相关设定 ###
+    # 股票类每笔交易时的手续费是：买入时佣金万分之三，卖出时佣金万分之三加千分之一印花税, 每笔交易佣金最低扣5块钱
+    # set_order_cost(OrderCost(close_tax=0, open_commission=0.0003, close_commission=0.0003, min_commission=5),
+    #                type='etf')
+
+    g.security = '510300.XSHG'
+
+    # 运行函数（reference_security为运行时间的参考标的；传入的标的只做种类区分，因此传入'000300.XSHG'或'510300.XSHG'是一样的）
+    # 开盘前运行
+    # run_daily(before_market_open, time='before_open', reference_security='000300.XSHG')
+    # 开盘时运行
+    run_daily(market_open, time='14:50', reference_security='000300.XSHG')
+    # 收盘后运行
+    run_daily(after_market_close, time='after_close', reference_security='000300.XSHG')
+
+
+# 开盘时运行函数
+def market_open(context):
+    # type: (Context) -> NoReturn
+    security = g.security
+
+    # 取得当前的现金
+    cash = context.portfolio.available_cash
+
+    sgn = get_signal(context, '000300.XSHG')
+
+    if sgn == 1:
+        if cash > 0:
+            # 记录这次买入
+            log.info("sgn == 1, 买入 %s" % security)
+            # 用所有 cash 买入股票
+            order_value(security, cash)
+    elif (1 > sgn > 0) and (security in context.portfolio.positions):
+        pos_vol = int(
+            sgn * context.portfolio.positions[security].closeable_amount / context.portfolio.positions[security].price)
+        if abs(context.portfolio.positions[security].total_amount - pos_vol) >= 100:
+            log.info('1 > sgn > 0, 调仓 %s' % security)
+            order_target(security, pos_vol)
+    elif sgn < 0 and security in context.portfolio.positions:
+        # 记录这次卖出
+        log.info("sgn < 0, 卖出 %s" % security)
+        # 卖出所有股票,使这只股票的最终持有量为0
+        order_target(security, 0)
+
+
+# 获取交易信号
+def get_signal(context, sec="000300.XSHG"):
+    df = attribute_history(sec, 60, '5d', fields=['open', 'close', 'low', 'high', 'volume'], df=False)
+
+    df['DIFF'], df['DEA'], df['MACD'] = ta.MACD(df['close'], fastperiod=12, slowperiod=26, signalperiod=9)
+    df['MACD'] = 2 * df['MACD']
+    df['VDIFF'], df['VDEA'], df['VMACD'] = ta.MACD(df['volume'], fastperiod=12, slowperiod=26, signalperiod=9)
+    df['VMACD'] = 2 * df['VMACD']
+
+    # 判断信号
+    # 短趋势与中线分离上穿，发出买入信号
+    if df['MACD'][-1] > 0:
+        if df['VMACD'][-1] > 0:
+            return 1
+        else:
+            return 0.5
+    elif df['MACD'][-1] < 0:
+        return -1
+    else:
+        return 0
+
+
+# 收盘后运行函数
+def after_market_close(context):
+    # log.info(str('函数运行时间(after_market_close):'+str(context.current_dt.time())))
+    # 得到当天所有成交记录
+    trades = get_trades()
+    for _trade in trades.values():
+        log.info('成交记录：' + str(_trade))
+    # log.info('一天结束')
+    # log.info('##############################################################')

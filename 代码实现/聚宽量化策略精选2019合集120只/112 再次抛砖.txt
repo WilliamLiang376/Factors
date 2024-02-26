@@ -1,0 +1,372 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/24103
+# 标题：再次抛砖
+# 作者：那時花開海布裡
+# 回测资金需要 100万，回测设置为 分钟 。
+
+# 导入函数库
+from jqdata import *
+import numpy as np
+from jqlib.technical_analysis import *
+from datetime import datetime
+## 初始化函数，设定基准等等
+def initialize(context):
+    set_option("avoid_future_data", True)
+    set_params() 
+    # 设定沪深300作为基准
+    set_benchmark('000300.XSHG')
+    # 开启动态复权模式(真实价格)
+    set_option('use_real_price', True)
+    # 过滤掉order系列API产生的比error级别低的log
+    # log.set_level('order', 'error')
+    # 输出内容到日志 log.info()
+    log.info('初始函数开始运行且全局只运行一次')
+    
+    ### 期货相关设定 ###
+    # 设定账户为金融账户
+    set_subportfolios([SubPortfolioConfig(cash=context.portfolio.starting_cash, type='index_futures')])
+    # 期货类每笔交易时的手续费是：买入时万分之0.23,卖出时万分之0.23,平今仓为万分之23 注意这里平今还用的是万4.6而不是现在的万3.45
+    set_order_cost(OrderCost(open_commission=0.000023, close_commission=0.000023,close_today_commission=0.0046), type='index_futures')
+    # 设定保证金比例
+    set_option('futures_margin_rate', 0.15)
+
+    # 设置期货交易的滑点
+    set_slippage(StepRelatedSlippage(2))
+    # 运行函数（reference_security为运行时间的参考标的；传入的标的只做种类区分，因此传入'IF8888.CCFX'或'IH1602.CCFX'是一样的）
+    # 注意：before_open/open/close/after_close等相对时间不可用于有夜盘的交易品种，有夜盘的交易品种请指定绝对时间（如9：30）
+      # 开盘前运行
+    run_daily( before_market_open, time='09:00', reference_security='IF8888.CCFX')
+      # 开盘时运行
+    # run_daily( market_open, time='09:30', reference_security='IF8888.CCFX')
+      # 收盘后运行
+    run_daily( after_market_close, time='15:30', reference_security='IF8888.CCFX')
+
+def set_params():
+    g.nMa = 17
+    g.nMaSlope =5
+    g.SlopeLong = 100.2
+    g.SlopeShort = 98.6
+    
+## 开盘前运行函数
+def before_market_open(context):
+    # 输出运行时间
+    log.info('函数运行时间(before_market_open)：'+str(context.current_dt.time()))
+
+    # 给微信发送消息（添加模拟交易，并绑定微信生效）
+    # send_message('美好的一天~')
+
+    ## 获取要操作的股票(g.为全局变量)
+      # 获取当月沪深300指数期货合约
+    g.IF_current_month = get_future_contracts('IF')[1]
+      # 获取下季沪深300指数期货合约
+    g.IF_next_quarter = get_future_contracts('IF')[3]
+
+## 开盘时运行函数
+def handle_data(context, data):
+    ## 交易
+    hour = context.current_dt.hour
+    minute = context.current_dt.minute
+    # 当月合约
+    IF_current_month = g.IF_current_month
+    # 下季合约
+    IF_next_quarter = g.IF_next_quarter
+    
+    if hour == 9 and minute == 31:
+        signal = get_signal(context)
+        log.info('signal =',signal)
+        if signal == 1 and len(context.portfolio.long_positions) == 0:
+            order_target_value(IF_next_quarter,context.portfolio.cash*0.25, side='long')
+            log.info('多单开仓')
+        elif signal == 1 and len(context.portfolio.long_positions) != 0:
+            log.info('继续持有多单')
+        elif signal ==-1 and len(context.portfolio.short_positions) == 0:
+            order_target_value(IF_next_quarter,context.portfolio.cash*0.2, side='short')
+            log.info('空单开仓')
+        elif signal ==-1 and len(context.portfolio.short_positions) != 0:
+            log.info('继续空单')
+        elif signal == 0 and len(context.portfolio.positions) == 0:
+            log.info('暂时空仓')
+        elif signal == 0 and len(context.portfolio.positions) != 0:
+            sell_all_long(context)
+            sell_all_short(context)
+            log.info('平所有仓位')
+        return
+    if hour == 10 and minute == 31:
+        signal = get_signal(context)
+        log.info('signal =',signal)
+        if signal == 1 and len(context.portfolio.long_positions) == 0:
+            order_target_value(IF_next_quarter,context.portfolio.cash*0.25, side='long')
+            log.info('多单开仓')
+        elif signal == 1 and len(context.portfolio.long_positions) != 0:
+            log.info('继续持有多单')
+        elif signal ==-1 and len(context.portfolio.short_positions) == 0:
+            order_target_value(IF_next_quarter,context.portfolio.cash*0.2, side='short')
+            log.info('空单开仓')
+        elif signal ==-1 and len(context.portfolio.short_positions) != 0:
+            log.info('继续空单')
+        elif signal == 0 and len(context.portfolio.positions) == 0:
+            log.info('暂时空仓')
+        elif signal == 0 and len(context.portfolio.positions) != 0:
+            sell_long_pos(context)
+            sell_short_pos(context)
+            log.info('平所有仓位')
+        log.info('10点31分')
+        return
+    if hour == 11 and minute == 1:
+        signal = get_signal(context)
+        log.info('signal =',signal)
+        if signal == 1 and len(context.portfolio.long_positions) == 0:
+            order_target_value(IF_next_quarter,context.portfolio.cash*0.25, side='long')
+            log.info('多单开仓')
+        elif signal == 1 and len(context.portfolio.long_positions) != 0:
+            log.info('继续持有多单')
+        elif signal ==-1 and len(context.portfolio.short_positions) == 0:
+            order_target_value(IF_next_quarter,context.portfolio.cash*0.2, side='short')
+            log.info('空单开仓')
+        elif signal ==-1 and len(context.portfolio.short_positions) != 0:
+            log.info('继续空单')
+        elif signal == 0 and len(context.portfolio.positions) == 0:
+            log.info('暂时空仓')
+        elif signal == 0 and len(context.portfolio.positions) != 0:
+            sell_long_pos(context)
+            sell_short_pos(context)
+            log.info('平所有仓位')
+        log.info('11点1分')
+        return
+    if hour == 13 and minute == 5:
+        signal = get_signal(context)
+        log.info('signal =',signal)
+        if signal == 1 and len(context.portfolio.long_positions) == 0:
+            order_target_value(IF_next_quarter,context.portfolio.cash*0.25, side='long')
+            log.info('多单开仓')
+        elif signal == 1 and len(context.portfolio.long_positions) != 0:
+            log.info('继续持有多单')
+        elif signal ==-1 and len(context.portfolio.short_positions) == 0:
+            order_target_value(IF_next_quarter,context.portfolio.cash*0.2, side='short')
+            log.info('空单开仓')
+        elif signal ==-1 and len(context.portfolio.short_positions) != 0:
+            log.info('继续空单')
+        elif signal == 0 and len(context.portfolio.positions) == 0:
+            log.info('暂时空仓')
+        elif signal == 0 and len(context.portfolio.positions) != 0:
+            sell_long_pos(context)
+            sell_short_pos(context)
+            log.info('平所有仓位')
+        log.info('13点5分')
+        return
+    if hour == 13 and minute == 35:
+        signal = get_signal(context)
+        log.info('signal =',signal)
+        if signal == 1 and len(context.portfolio.long_positions) == 0:
+            order_target_value(IF_next_quarter,context.portfolio.cash*0.25, side='long')
+            log.info('多单开仓')
+        elif signal == 1 and len(context.portfolio.long_positions) != 0:
+            log.info('继续持有多单')
+        elif signal ==-1 and len(context.portfolio.short_positions) == 0:
+            order_target_value(IF_next_quarter,context.portfolio.cash*0.2, side='short')
+            log.info('空单开仓')
+        elif signal ==-1 and len(context.portfolio.short_positions) != 0:
+            log.info('继续空单')
+        elif signal == 0 and len(context.portfolio.positions) == 0:
+            log.info('暂时空仓')
+        elif signal == 0 and len(context.portfolio.positions) != 0:
+            sell_long_pos(context)
+            sell_short_pos(context)
+            log.info('平所有仓位')
+        log.info('13点35分')
+        return
+    if hour == 14 and minute == 5:
+        signal = get_signal(context)
+        log.info('signal =',signal)
+        if signal == 1 and len(context.portfolio.long_positions) == 0:
+            order_target_value(IF_next_quarter,context.portfolio.cash*0.25, side='long')
+            log.info('多单开仓')
+        elif signal == 1 and len(context.portfolio.long_positions) != 0:
+            log.info('继续持有多单')
+        elif signal ==-1 and len(context.portfolio.short_positions) == 0:
+            order_target_value(IF_next_quarter,context.portfolio.cash*0.2, side='short')
+            log.info('空单开仓')
+        elif signal ==-1 and len(context.portfolio.short_positions) != 0:
+            log.info('继续空单')
+        elif signal == 0 and len(context.portfolio.positions) == 0:
+            log.info('暂时空仓')
+        elif signal == 0 and len(context.portfolio.positions) != 0:
+            sell_long_pos(context)
+            sell_short_pos(context)
+            log.info('平所有仓位')
+        log.info('14点5分',context.portfolio.positions)    
+        return
+    if hour == 14 and minute == 35:
+        signal = get_signal(context)
+        log.info('signal =',signal)
+        if signal == 1 and len(context.portfolio.long_positions) == 0:
+            order_target_value(IF_next_quarter,context.portfolio.cash*0.25, side='long')
+            log.info('多单开仓')
+        elif signal == 1 and len(context.portfolio.long_positions) != 0:
+            log.info('继续持有多单')
+        elif signal ==-1 and len(context.portfolio.short_positions) == 0:
+            order_target_value(IF_next_quarter,context.portfolio.cash*0.2, side='short')
+            log.info('空单开仓')
+        elif signal ==-1 and len(context.portfolio.short_positions) != 0:
+            log.info('继续空单')
+        elif signal == 0 and len(context.portfolio.positions) == 0:
+            log.info('暂时空仓')
+        elif signal == 0 and len(context.portfolio.positions) != 0:
+            sell_long_pos(context)
+            sell_short_pos(context)
+            log.info('平所有仓位')
+        log.info('14点35分')
+        return
+    
+#获取信号:1认定为上涨趋势，-1认定人下降趋势，0为震荡市，其中震荡市不开仓
+def get_signal(context):
+    signal = 0
+    Slopeflag = MA_Slope('000300.XSHG')
+    current_price = getCurrentPrice('000300.XSHG')
+    price_nMa = getStockAvPrice('000300.XSHG',g.nMa)
+    if Slopeflag > g.SlopeLong and current_price > price_nMa:
+        signal = 1
+    elif Slopeflag< g.SlopeShort :
+        signal = -1
+    else:
+        signal = 0
+    log.info (signal)
+    return signal
+
+## 收盘后运行函数
+def after_market_close(context):
+    log.info(str('函数运行时间(after_market_close):'+str(context.current_dt.time())))
+    # 得到当天所有成交记录
+    trades = get_trades()
+    for _trade in trades.values():
+        log.info('成交记录：'+str(_trade))
+    log.info('一天结束')
+    log.info('##############################################################')
+
+########################## 获取期货合约信息，请保留 #################################
+# 获取金融期货合约到期日
+def get_CCFX_end_date(future_code):
+    # 获取金融期货合约到期日
+    return get_security_info(future_code).end_date
+
+# 获取均线斜率
+def MA_Slope(security):
+    array_bars = get_bars(security, g.nMaSlope+1, '1d', fields=['close'], include_now =True)
+    ma_now = array_bars[1:g.nMaSlope+1]
+    ma_last = array_bars[0:g.nMaSlope]
+    k_ma = np.mean(ma_now['close'])/np.mean(ma_last['close'])*100
+    log.info ('k_ma =',k_ma)
+    return k_ma
+#取得股票某个区间内的所有收盘价
+def getStockPrice(stock, interval):
+    h = attribute_history(stock, interval*240, unit='1m', fields=('close'), skip_paused=True)
+    return (h['close'].values[-1],h['close'].mean())
+# 获取持仓时间
+def get_days_long(context, stock):
+    log.info (context.portfolio.long_positions[stock])
+    start_time = context.portfolio.long_positions[stock].init_time  # 获取建仓时间
+    log.info (start_time)
+    day=get_trade_days(start_date=start_time.date(), end_date=context.current_dt.date())
+    return len(day)
+
+# 获取持仓时间
+def get_days_short(context, stock):
+    start_time = context.portfolio.short_positions[stock].init_time  # 获取建仓时间
+    print(context.portfolio.short_positions[stock])
+    day=get_trade_days(start_date=start_time.date(), end_date=context.current_dt.date())
+    return len(day)
+# 平仓非今日多单
+def sell_long_pos(context):
+    for pos in context.portfolio.long_positions:
+        if get_days_long(context,pos)>1:
+            return order_target_value(pos,0,side='long')
+# 平仓全部多单
+def sell_all_long(context):
+    for pos in context.portfolio.long_positions:
+        return order_target_value(pos,0,side='long')
+
+# 平仓非今日空单
+def sell_short_pos(context):
+    for pos in context.portfolio.short_positions:
+        if get_days_short(context,pos)>1:
+            return order_target_value(pos,0,side='short')
+# 平仓全部空单
+def sell_all_short(context):
+    for pos in context.portfolio.short_positions:
+        return order_target_value(pos,0,side='short')
+# 获取当前价格
+def getCurrentPrice(stock):
+    h= attribute_history(stock, 1, unit='1m', fields=('close'), skip_paused=True)
+    return (h['close'].values[-1])
+# 获取均线价格
+def getStockAvPrice(stock, interval):
+    h = attribute_history(stock, interval*240, unit='1m', fields=('close'), skip_paused=True)
+    return h['close'].mean()
+########################## 自动移仓换月函数 #################################
+def position_auto_switch(context,pindex=0,switch_func=None, callback=None):
+    """
+    期货自动移仓换月。默认使用市价单进行开平仓。
+    :param context: 上下文对象
+    :param pindex: 子仓对象
+    :param switch_func: 用户自定义的移仓换月函数.
+        函数原型必须满足：func(context, pindex, previous_dominant_future_position, current_dominant_future_symbol)
+    :param callback: 移仓换月完成后的回调函数。
+        函数原型必须满足：func(context, pindex, previous_dominant_future_position, current_dominant_future_symbol)
+    :return: 发生移仓换月的标的。类型为列表。
+    """
+    import re
+    subportfolio = context.subportfolios[pindex]
+    symbols = set(subportfolio.long_positions.keys()) | set(subportfolio.short_positions.keys())
+    switch_result = []
+    for symbol in symbols:
+        match = re.match(r"(?P<underlying_symbol>[A-Z]{1,})", symbol)
+        if not match:
+            raise ValueError("未知期货标的：{}".format(symbol))
+        else:
+            dominant = get_dominant_future(match.groupdict()["underlying_symbol"])
+            cur = get_current_data()
+            symbol_last_price = cur[symbol].last_price
+            dominant_last_price = cur[dominant].last_price
+            if dominant > symbol:
+                for p in (subportfolio.long_positions.get(symbol, None), subportfolio.short_positions.get(symbol, None)):
+                    if p is None:
+                        continue
+                    if switch_func is not None:
+                        switch_func(context, pindex, p, dominant)
+                    else:
+                        amount = p.total_amount
+                        # 跌停不能开空和平多，涨停不能开多和平空。
+                        if p.side == "long":
+                            symbol_low_limit = cur[symbol].low_limit
+                            dominant_high_limit = cur[dominant].high_limit
+                            if symbol_last_price <= symbol_low_limit:
+                                log.warning("标的{}跌停，无法平仓。移仓换月取消。".format(symbol))
+                                continue
+                            elif dominant_last_price >= dominant_high_limit:
+                                log.warning("标的{}涨停，无法开仓。移仓换月取消。".format(symbol))
+                                continue
+                            else:
+                                log.info("进行移仓换月：({0},long) -> ({1},long)".format(symbol, dominant))
+                                order_target(symbol,0,side='long')
+                                order_target(dominant,amount,side='long')
+                                switch_result.append({"before": symbol, "after":dominant, "side": "long"})
+                            if callback:
+                                callback(context, pindex, p, dominant)
+                        if p.side == "short":
+                            symbol_high_limit = cur[symbol].high_limit
+                            dominant_low_limit = cur[dominant].low_limit
+                            if symbol_last_price >= symbol_high_limit:
+                                log.warning("标的{}涨停，无法平仓。移仓换月取消。".format(symbol))
+                                continue
+                            elif dominant_last_price <= dominant_low_limit:
+                                log.warning("标的{}跌停，无法开仓。移仓换月取消。".format(symbol))
+                                continue
+                            else:
+                                log.info("进行移仓换月：({0},short) -> ({1},short)".format(symbol, dominant))
+                                order_target(symbol,0,side='short')
+                                order_target(dominant,amount,side='short')
+                                switch_result.append({"before": symbol, "after": dominant, "side": "short"})
+                                if callback:
+                                    callback(context, pindex, p, dominant)
+    return switch_result

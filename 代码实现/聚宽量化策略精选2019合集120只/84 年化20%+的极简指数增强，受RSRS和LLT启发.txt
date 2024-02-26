@@ -1,0 +1,90 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/21853
+# 标题：年化20%+的极简指数增强，受RSRS和LLT启发
+# 作者：etrobot
+
+import numpy as np
+from jqdata import *
+from datetime import datetime, date
+# 初始化函数，设定基准等等
+def initialize(context):
+    set_option("avoid_future_data", True)
+    # 设定沪深300作为基准
+    set_benchmark('000300.XSHG')
+    # 开启动态复权模式(真实价格)
+    set_option('use_real_price', True)
+    # 输出内容到日志 log.info()
+    log.info('初始函数开始运行且全局只运行一次')
+    # 过滤掉order系列API产生的比error级别低的log
+    log.set_level('order','error')
+    g.buylist=[]
+    g.idxwarn=True
+    ### 股票相关设定 ###
+    # 股票类每笔交易时的手续费是：买入时佣金万分之三，卖出时佣金万分之三加千分之一印花税, 每笔交易佣金最低扣5块钱
+    set_order_cost(OrderCost(close_tax=0.001, open_commission=0.0003, close_commission=0.0003, min_commission=5), type='stock')
+    
+    ## 运行函数（reference_security为运行时间的参考标的；传入的标的只做种类区分，因此传入'000300.XSHG'或'510300.XSHG'是一样的）
+      # 开盘前运行
+    run_daily(before_market_open, time='before_open', reference_security='000300.XSHG') 
+      # 开盘时运行
+    run_daily(market_open, time='open', reference_security='000300.XSHG')
+      # 收盘后运行
+    # run_daily(after_market_close, time='15:00', reference_security='000300.XSHG')
+
+def kData(context,stock,countNum):
+    return attribute_history(stock,count = countNum, unit='1d'
+        , fields=['open', 'close', 'high', 'low', 'volume', 'money','high_limit','low_limit']
+        , skip_paused=True
+        , df=False
+        , fq='pre')
+
+#波动变小后给出信号
+def indexwarn(context,idx='000001.XSHG'):
+    pdata=kData(context,idx,20)
+    idxc=pdata['close']
+    cs=idxc[-10:]
+    volatility=[floor(max(idxc[i-10:i])/min(idxc[i-10:i])*100)/100.0 for i in range(-10,0)]
+    if min(cs[-5:-1])==min(cs):
+        if max(volatility[5:])!=max(volatility):
+            log.info('ready to buy')
+            return False
+    return True
+
+def before_market_open(context):
+    g.buylist=[]
+    g.idxwarn=indexwarn(context)
+    # 要操作的股票：指数成分股总基本面前10
+    q = query(
+            valuation.code,
+            valuation.pe_ratio
+        ).filter(
+            valuation.code.in_(get_index_stocks('000009.XSHG'))
+        ).order_by(
+            valuation.pe_ratio.asc()
+        )
+    
+    df = get_fundamentals(q)
+    g.buylist=df.code.tolist()[:5]
+
+## 开盘时运行函数
+def market_open(context):
+    selldone=dict()
+    buydone=dict()
+    
+    stock_count=len(list(context.portfolio.positions.keys()))
+    if stock_count > 0 :
+        for stock in context.portfolio.positions:
+            stockHolding = context.portfolio.positions[stock]
+            inidays=len(get_trade_days(stockHolding.init_time,context.current_dt))
+            if inidays>15:#持仓15个交易日然后全部卖出
+                order_target(stock,0)
+                    
+    if g.idxwarn:
+        return
+    
+    cash = context.portfolio.total_value/10
+    for stock in g.buylist:
+        order_value(stock, cash)
+
+    

@@ -1,0 +1,130 @@
+# 风险及免责提示：该策略由聚宽用户分享，仅供学习交流使用。
+# 原文一般包含策略说明，如有疑问建议到原文和作者交流讨论。
+# 克隆自聚宽文章：https://www.joinquant.com/post/17402
+# 标题：戴维斯双杀简单实现，年化23%，无未来
+# 作者：一梦春秋
+
+# 本策略请选择 python 2 下回测
+
+'''
+策略思路：
+选股：戴维斯双杀，高eps低pe
+择时：无
+持仓：轮动
+
+'''
+# 导入函数库
+import statsmodels.api as sm
+from pandas.stats.api import ols
+
+# 初始化函数，设定基准等等
+def initialize(context):
+    set_option("avoid_future_data", True)
+    # 开启动态复权模式(真实价格)
+    set_option('use_real_price', True)
+    # 过滤掉order系列API产生的比error级别低的log
+    # log.set_level('order', 'error')
+    ### 股票相关设定 ###
+    set_parameter(context)
+    # 股票类每笔交易时的手续费是：买入时佣金万分之三，卖出时佣金万分之三加千分之一印花税, 每笔交易佣金最低扣5块钱
+    set_order_cost(OrderCost(close_tax=0.001, open_commission=0.0003, close_commission=0.0003, min_commission=5), type='stock')
+    
+    ## 运行函数（reference_security为运行时间的参考标的；传入的标的只做种类区分，因此传入'000300.XSHG'或'510300.XSHG'是一样的）
+      # 开盘前运行
+    run_daily(before_market_open, time='before_open', reference_security='000300.XSHG') 
+      # 开盘时运行
+    # run_daily(market_open, time='open', reference_security='000300.XSHG')
+      # 收盘后运行
+    run_daily(after_market_close, time='after_close', reference_security='000300.XSHG')
+    
+    #每月轮动
+    run_monthly(trade_func, 1, "09:30")
+'''
+==============================参数设置部分================================
+'''
+def set_parameter(context):
+    #持仓股票数
+    g.stock_num = 5
+    g.stock_pos = 0
+    
+    #风险参考基准
+    g.security = '000300.XSHG'
+    # 设定策略运行基准
+    set_benchmark(g.security)
+    #记录策略运行天数
+    g.days = 0
+    
+    
+## 开盘前运行函数     
+def before_market_open(context):
+    # 输出运行时间
+    #log.info('函数运行时间(before_market_open)：'+str(context.current_dt.time()))
+    g.days += 1
+    # 给微信发送消息（添加模拟交易，并绑定微信生效）
+    log.info('策略正常，运行第%s天~'%g.days)
+    send_message('策略正常，运行第%s天~'%g.days)
+
+## 开盘时运行函数
+def handle_data(context, data):
+    record(cash=context.portfolio.cash)
+            
+#策略选股买卖部分    
+def trade_func(context):
+    #获取股票池
+    df = get_fundamentals(
+        query(
+            valuation.code,
+            valuation.pb_ratio,
+            indicator.roe,
+            valuation.pe_ratio,
+            indicator.eps
+        )
+        # .filter(
+        #     indicator.roe > 0,
+        #     valuation.pb_ratio < 5
+        # )
+    )
+    #进行pb,roe大于0筛选
+    df = df[(df['eps']>0) & (df['pe_ratio']>0)].sort('pe_ratio')
+    #以股票名词作为index
+    df.index = df['code'].values
+    #取roe倒数
+    df['1/eps'] = 1/df['eps']
+    #获取综合得分
+    df['point'] = df[['pe_ratio','1/eps']].rank().T.apply(f_sum)
+    #按得分进行排序，取指定数量的股票
+    df = df.sort('point')[g.stock_pos:g.stock_num+g.stock_pos]
+    pool = df.index
+    
+    
+    log.info('总共选出%s只股票'%len(pool))
+    if len(pool) == 0:
+        return;
+        
+    #得到每只股票应该分配的资金
+    cash = context.portfolio.total_value/len(pool)
+    #获取已经持仓列表
+    hold_stock = context.portfolio.positions.keys() 
+    #卖出不在持仓中的股票
+    for s in hold_stock:
+        if s not in pool:
+            order_target(s,0)
+    #买入股票
+    for s in pool:
+        log.info("买入股票:"+s)
+        order_target_value(s,cash)
+#打分工具
+def f_sum(x):
+    point = sum(x)
+    # point = x['pb_ratio']*2+x['1/roe']
+    return point
+        
+## 收盘后运行函数  
+def after_market_close(context):
+    #得到当天所有成交记录
+    trades = get_trades()
+    for _trade in trades.values():
+        log.info('成交记录：'+str(_trade))
+    #打印账户总资产
+    log.info('今日账户总资产：%s'%round(context.portfolio.total_value,2))
+    log.info('##############################################################')
